@@ -13,7 +13,11 @@
  *
  * The `boat` scenario runs only when named. It makes a real VM: the Worker needs the real `BOAT_API_KEY`
  * and `HOSTED_SERVER_TEMPLATE`, and the template must know a public origin of this Worker. It waits
- * until OpenBot in the VM redeems its claim and publishes its host, then deletes the server.
+ * until OpenBot in the VM redeems its claim and publishes its host. Then it waits for the idle stop
+ * (about 15 minutes), starts the server, changes the plan, ends it, renews it, and deletes the server.
+ * `--checkout` pays each Checkout page with a test card in the local Chrome. The web client then
+ * connects to the server over Signal, and the screenshots go to `.openbot-build/`.
+ * `--remote-d1` reads the D1 of the deployed `test` Worker; pass its origin as `--api`.
  */
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -22,6 +26,7 @@ import { dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import type { BillingPortalRequest } from "@openbot/contracts/billing";
+import { type Browser, chromium } from "playwright-core";
 import { z } from "zod";
 import { STRIPE_API_VERSION } from "../apps/auth-api/src/server/stripe-client";
 
@@ -81,6 +86,7 @@ const rowSchema = z.object({
   observed_error: z.string().nullable(),
   provider_sandbox_id: z.string().nullable(),
   checkout_session_id: z.string().nullable(),
+  last_active_at: z.number().nullable(),
   deleted_at: z.number().nullable(),
 });
 type Row = z.infer<typeof rowSchema>;
@@ -103,7 +109,7 @@ const hostSchema = z.object({
   published: z.number(),
 });
 const commandSchema = z.object({ exitCode: z.number().nullable().optional(), stdout: z.string().optional() });
-const sandboxSchema = z.object({ sandbox: z.object({ state: z.string() }) });
+const sandboxSchema = z.object({ sandbox: z.object({ state: z.string(), type: z.string().optional() }) });
 const portalSchema = z.object({ url: z.string() });
 
 /** The request bodies of the browser API routes that this check calls. */
@@ -162,11 +168,19 @@ async function boat(method: "GET" | "POST", path: string, body?: { command: stri
 
 const d1ResultSchema = z.array(z.object({ results: z.array(z.unknown()) }));
 
+/** `--remote-d1` reads the D1 of the deployed `test` Worker. Wrangler then uses its own sign-in, not the API token. */
+const REMOTE_D1 = process.argv.includes("--remote-d1");
+/** `--checkout` pays the boat server on the real Checkout page with a test card, in the local Chrome. */
+const REAL_CHECKOUT = process.argv.includes("--checkout");
+
 function d1<T>(sql: string, schema: z.ZodType<T>): T[] {
+  const target = REMOTE_D1 ? ["openbot-auth-test", "--remote", "--env", "test"] : ["openbot-auth", "--local"];
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  if (REMOTE_D1) delete env.CLOUDFLARE_API_TOKEN;
   const result = spawnSync(
-    "bunx",
-    ["wrangler", "d1", "execute", "openbot-auth", "--local", "--json", "--command", sql],
-    { cwd: join(ROOT, "apps/auth-api"), encoding: "utf8" },
+    join(ROOT, "node_modules/.bin/wrangler"),
+    ["d1", "execute", ...target, "--json", "--command", sql],
+    { cwd: join(ROOT, "apps/auth-api"), encoding: "utf8", env },
   );
   if (result.status !== 0) throw new Error(`D1 failed: ${result.stderr.slice(0, 400)}`);
   return d1ResultSchema
@@ -283,7 +297,7 @@ class Account {
     return (
       d1(
         `SELECT server_id, size, plan, billing_interval, currency, desired_state, observed_state, observed_error,
-                provider_sandbox_id, checkout_session_id, deleted_at
+                provider_sandbox_id, checkout_session_id, last_active_at, deleted_at
          FROM hosted_servers WHERE server_id = ${quote(serverId)}`,
         rowSchema,
       )[0] ?? null
@@ -332,6 +346,138 @@ class Account {
       180_000,
     );
     return target;
+  }
+}
+
+/** The `boat` scenario only: the local Chrome, headless, for the Checkout page and the web client. */
+let chrome: Promise<Browser> | null = null;
+const browser = () => {
+  chrome ??= chromium.launch({ channel: "chrome", headless: true });
+  return chrome;
+};
+
+/** Pays a Checkout page with the Stripe test card and waits for the return to the Worker. */
+async function payCheckout(url: string, returnOrigin: string, screenshot: string) {
+  const context = await (await browser()).newContext();
+  try {
+    const page = await context.newPage();
+    await page.goto(url);
+    try {
+      // With more than one payment method, Checkout shows the card fields after the card choice.
+      const card = page.getByRole("radio", { name: "Card", exact: true });
+      await Promise.race([card.waitFor(), page.locator("#cardNumber").waitFor()]);
+      if (await card.isVisible()) await card.check({ force: true });
+      await page.fill("#cardNumber", "4242424242424242");
+    } catch (error) {
+      await page.screenshot({ path: join(ROOT, ".openbot-build", `failed-${screenshot}`), fullPage: true });
+      throw error;
+    }
+    await page.fill("#cardExpiry", "12 / 34");
+    await page.fill("#cardCvc", "123");
+    await page.fill("#billingName", "Stripe E2E");
+    const country = page.locator("#billingCountry");
+    if (await country.count()) await country.selectOption("PL");
+    const zip = page.locator("#billingPostalCode");
+    if ((await zip.count()) && (await zip.isVisible())) await zip.fill("00-001");
+    const save = page.locator("#enableStripePass");
+    if ((await save.count()) && (await save.isChecked())) await save.dispatchEvent("click");
+    await page.screenshot({ path: join(ROOT, ".openbot-build", screenshot) });
+    await page.getByTestId("hosted-payment-submit-button").dispatchEvent("click");
+    await page.waitForURL((current) => current.origin === returnOrigin, { timeout: 90_000 });
+    return new URL(page.url()).pathname;
+  } finally {
+    await context.close();
+  }
+}
+
+// Keeps each peer connection of the page, so the check can read the selected ICE candidates.
+const PEER_TRACE = `(() => {
+  const Native = window.RTCPeerConnection;
+  window.__e2ePeers = [];
+  window.RTCPeerConnection = function (...args) {
+    const peer = new Native(...args);
+    window.__e2ePeers.push(peer);
+    return peer;
+  };
+  window.RTCPeerConnection.prototype = Native.prototype;
+})();`;
+const PEER_STATS = `(async () => {
+  const peers = [];
+  for (const peer of window.__e2ePeers ?? []) {
+    const stats = await peer.getStats();
+    let pair = null;
+    stats.forEach((entry) => {
+      if (entry.type === "transport" && entry.selectedCandidatePairId) pair = stats.get(entry.selectedCandidatePairId);
+    });
+    peers.push({
+      state: peer.connectionState,
+      local: pair ? (stats.get(pair.localCandidateId)?.candidateType ?? null) : null,
+      remote: pair ? (stats.get(pair.remoteCandidateId)?.candidateType ?? null) : null,
+      iceServers: (peer.getConfiguration().iceServers ?? []).flatMap((server) =>
+        [].concat(server.urls).map((url) => url.split("?")[0])),
+    });
+  }
+  return peers;
+})()`;
+const peersSchema = z.array(
+  z.object({
+    state: z.string(),
+    local: z.string().nullable(),
+    remote: z.string().nullable(),
+    iceServers: z.array(z.string()),
+  }),
+);
+
+/**
+ * Opens the web client as the account, waits until it shows the server and a peer connection is
+ * connected, and then waits for the server's next activity report. Closing the page ends the use.
+ */
+async function connectWeb(account: Account, serverId: string, name: string, screenshot: string) {
+  const context = await (await browser()).newContext();
+  try {
+    await context.addCookies([
+      { name: "__Host-openbot-web", value: account.token, url: `${account.api}/`, secure: true, httpOnly: true },
+    ]);
+    await context.addInitScript(PEER_TRACE);
+    const page = await context.newPage();
+    const consoleLines: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error" || message.type() === "warning") consoleLines.push(message.text());
+    });
+    const start = Date.now();
+    await page.goto(`${account.api}/app`);
+    try {
+      // The rail names the button "{name} server", followed by its status labels.
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+      const label = new RegExp(`^${escaped} server(,|$)`, "u");
+      await page.getByRole("button", { name: label }).waitFor({ timeout: 180_000 });
+    } catch (error) {
+      await page.screenshot({ path: join(ROOT, ".openbot-build", `failed-${screenshot}`), fullPage: true });
+      const snapshot = await page.locator("body").ariaSnapshot();
+      process.stdout.write(`page: ${page.url()}\n${snapshot}\nconsole:\n${consoleLines.join("\n")}\n`);
+      throw error;
+    }
+    const peers = await waitFor(
+      "peer connected",
+      async () => {
+        const list = peersSchema.parse(await page.evaluate(PEER_STATS));
+        return list.some((peer) => peer.state === "connected") ? list : null;
+      },
+      120_000,
+    );
+    const connectedAt = Date.now();
+    await page.screenshot({ path: join(ROOT, ".openbot-build", screenshot) });
+    const reported = await waitFor(
+      "activity report",
+      async () => {
+        const row = account.row(serverId);
+        return row?.last_active_at && row.last_active_at >= connectedAt ? row.last_active_at : null;
+      },
+      180_000,
+    ).catch(() => null);
+    return { connectMs: connectedAt - start, peers, activityReportedAfterMs: reported ? reported - connectedAt : null };
+  } finally {
+    await context.close();
   }
 }
 
@@ -745,31 +891,76 @@ const scenarios: Record<Scenario, (account: Account) => Promise<void>> = {
   },
   async boat(account) {
     const name = "Boat e2e";
-    const { server } = await account.createServer(name);
+    const { server, checkoutUrl } = await account.createServer(name);
+    const serverId = server.serverId;
     let deleted = false;
+    const sandbox = async (id: string) => {
+      const response = await boat("GET", `/sandboxes/${id}`);
+      return { status: response.status, ...sandboxSchema.safeParse(response.body).data?.sandbox };
+    };
+    const openPlan = () =>
+      waitFor(
+        "subscription stored",
+        async () => {
+          const [value] = d1(
+            `SELECT stripe_subscription_id FROM billing_subscriptions
+           WHERE server_id = ${quote(serverId)} AND status IN ('active', 'trialing') ORDER BY updated_at DESC LIMIT 1`,
+            z.object({ stripe_subscription_id: z.string() }),
+          );
+          return value?.stripe_subscription_id;
+        },
+        600_000,
+      );
+    /** The real Checkout page with a test card, or a subscription with the server metadata. */
+    let pages = 0;
+    const pay = async (url: string | null | undefined) => {
+      if (!REAL_CHECKOUT) return account.pay(serverId);
+      if (!url) throw new Error("No Checkout page");
+      pages += 1;
+      const returned = await payCheckout(url, new URL(account.api).origin, `boat-e2e-checkout-${pages}.png`);
+      print(`Checkout paid; returned to ${returned}`);
+      return openPlan();
+    };
+    // The deployed Worker gets the boat webhooks and runs the cron each minute. A local Worker needs a push.
+    const tick = () =>
+      REMOTE_D1
+        ? Promise.resolve()
+        : fetch(`${account.api}/cdn-cgi/handler/scheduled?cron=*+*+*+*+*`).catch(() => null);
+    const runningRow = (label: string, test: (row: Row) => boolean = () => true, timeoutMs = 600_000) =>
+      waitFor(
+        label,
+        async () => {
+          await tick();
+          const row = account.row(serverId);
+          return row?.observed_state === "running" && row.desired_state === "running" && test(row) ? row : null;
+        },
+        timeoutMs,
+      );
+    const serviceActive = async (sandboxId: string) => {
+      const response = await boat("POST", `/sandboxes/${sandboxId}/commands`, {
+        command: "systemctl is-active openbot.service; sudo -n journalctl -u openbot.service --no-pager -n 30 -o cat",
+        timeoutSeconds: 60,
+      });
+      return commandSchema.safeParse(response.body).data?.stdout ?? "";
+    };
     try {
-      await account.pay(server.serverId);
+      await pay(checkoutUrl);
       const created = await rowWhere(
         account,
-        server.serverId,
+        serverId,
         "sandbox",
         (row) => row.provider_sandbox_id !== null || row.observed_state === "error",
         120_000,
       );
       const sandboxId = created.provider_sandbox_id;
-      record("boat", "payment creates one boat VM from the template", sandboxId !== null, created);
-      if (!sandboxId) return;
-      // No boat webhook reaches a local Worker, so the cron moves the row from starting to running.
-      const tick = () => fetch(`${account.api}/cdn-cgi/handler/scheduled?cron=*+*+*+*+*`).catch(() => null);
-      const running = await waitFor(
-        "running",
-        async () => {
-          await tick();
-          const row = account.row(server.serverId);
-          return row?.observed_state === "running" ? row : null;
-        },
-        600_000,
+      record(
+        "boat",
+        `payment (${REAL_CHECKOUT ? "Checkout page, test card" : "subscription"}) creates one boat VM from the template`,
+        sandboxId !== null,
+        created,
       );
+      if (!sandboxId) return;
+      const running = await runningRow("running");
       record("boat", "the VM reaches running", true, running);
       const host = await waitFor(
         "claim redeemed and host published",
@@ -778,7 +969,7 @@ const scenarios: Record<Scenario, (account: Account) => Promise<void>> = {
             `SELECT h.claim_redeemed_at, r.name AS host_name, r.device_public_key IS NOT NULL AS published
              FROM hosted_servers h
              LEFT JOIN remote_hosts r ON r.host_id = h.server_id AND r.owner_user_id = h.owner_user_id
-             WHERE h.server_id = ${quote(server.serverId)}`,
+             WHERE h.server_id = ${quote(serverId)}`,
             hostSchema,
           );
           return value?.claim_redeemed_at && value.published ? value : null;
@@ -791,11 +982,7 @@ const scenarios: Record<Scenario, (account: Account) => Promise<void>> = {
         host.host_name === name,
         host,
       );
-      const service = await boat("POST", `/sandboxes/${sandboxId}/commands`, {
-        command: "systemctl is-active openbot.service; sudo -n journalctl -u openbot.service --no-pager -n 30 -o cat",
-        timeoutSeconds: 60,
-      });
-      const output = commandSchema.safeParse(service.body).data?.stdout ?? "";
+      const output = await serviceActive(sandboxId);
       record("boat", "openbot.service is active in the VM", output.startsWith("active"), output.split("\n"));
       // The claim works one time, so a server that did not store its session cannot sign in again. The
       // app signs in before it starts the host, so 60 seconds of a clean log is a complete start.
@@ -818,24 +1005,128 @@ const scenarios: Record<Scenario, (account: Account) => Promise<void>> = {
       record("boat", "the stored session signs the server in again after a restart", restarted === "active", {
         output: restarted,
       });
-      const removed = await account.request("DELETE", `v2/hosting/servers/${server.serverId}`, { confirmName: name });
+
+      const web = await connectWeb(account, serverId, name, "boat-e2e-web-connected.png");
+      record(
+        "boat",
+        "the web client connects to the server over Signal, and the server reports the use",
+        web.peers.some((peer) => peer.state === "connected") && web.activityReportedAfterMs !== null,
+        web,
+      );
+
+      // The page is closed, so the server reports no use. It stops 15 minutes after its last use.
+      const idleSince = Date.now();
+      const idle = await rowWhere(
+        account,
+        serverId,
+        "idle stop",
+        (row) => row.desired_state === "idle" && row.observed_state === "stopped",
+        30 * 60_000,
+      );
+      const idleBoat = await sandbox(sandboxId);
+      record(
+        "boat",
+        "with no use for 15 minutes the server stops and boat keeps the VM",
+        idleBoat.status === 200 && idleBoat.state !== "deleted",
+        { minutes: Math.round((Date.now() - idleSince) / 6_000) / 10, row: idle, boat: idleBoat },
+      );
+      await sleep(90_000);
+      const stillIdle = account.row(serverId);
+      record(
+        "boat",
+        "the cron and the boat webhook do not start an idle server",
+        stillIdle?.desired_state === "idle" && stillIdle.observed_state === "stopped",
+        stillIdle,
+      );
+      const woken = await account.request("POST", `v2/hosting/servers/${serverId}/wake`, {});
+      const awake = await runningRow("running after wake");
+      const again = await connectWeb(account, serverId, name, "boat-e2e-web-after-wake.png");
+      record(
+        "boat",
+        "Start (wake) resumes the idle server with the same VM, and the web client connects again",
+        awake.provider_sandbox_id === sandboxId && again.peers.some((peer) => peer.state === "connected"),
+        { status: woken.status, row: awake, web: again },
+      );
+
+      // A plan change: Starter (small) to Standard (default). The server stops and resumes on the new type.
+      const sub = await openPlan();
+      const item = (await subscription(sub)).items.data[0]?.id;
+      if (!item) throw new Error("No subscription item");
+      await stripe("POST", `/v1/subscriptions/${sub}`, idSchema, {
+        "items[0][id]": item,
+        "items[0][price]": await priceId("standard", "month"),
+        proration_behavior: "always_invoice",
+      });
+      const resized = await runningRow("resized", (row) => row.size === "default");
+      const resizedBoat = await sandbox(sandboxId);
+      const resizedWeb = await connectWeb(account, serverId, name, "boat-e2e-web-after-resize.png");
+      record(
+        "boat",
+        "Starter to Standard: the server moves to the boat default type, and the web client connects again",
+        resized.plan === "standard" &&
+          resizedBoat.type === "default" &&
+          resized.provider_sandbox_id === sandboxId &&
+          resizedWeb.peers.some((peer) => peer.state === "connected"),
+        { row: resized, boat: resizedBoat, web: resizedWeb },
+      );
+
+      // The plan ends now: the server stops with plan_ended, and the VM stays.
+      await stripe("DELETE", `/v1/subscriptions/${sub}`, idSchema);
+      const ended = await rowWhere(
+        account,
+        serverId,
+        "plan ended",
+        (row) => row.desired_state === "stopped" && row.observed_state === "stopped",
+        600_000,
+      );
+      const endedBoat = await sandbox(sandboxId);
+      record(
+        "boat",
+        "cancel: the server stops with plan_ended; the row and the VM stay",
+        ended.observed_error === "plan_ended" &&
+          ended.deleted_at === null &&
+          endedBoat.status === 200 &&
+          endedBoat.state !== "deleted",
+        { row: ended, boat: endedBoat },
+      );
+      const refused = await account.request("POST", `v2/hosting/servers/${serverId}/wake`, {});
+      record("boat", "a connect to a server whose plan ended: 402 plan_required", refused.status === 402, {
+        status: refused.status,
+        code: refused.code,
+      });
+
+      // Renew: a new plan starts the same VM again.
+      const renew = await account.checkout(serverId);
+      await pay(renew.checkoutUrl);
+      const renewed = await runningRow("renewed");
+      const renewedWeb = await connectWeb(account, serverId, name, "boat-e2e-web-after-renew.png");
+      record(
+        "boat",
+        "renew: the paid plan starts the same VM again, and the web client connects",
+        renewed.provider_sandbox_id === sandboxId &&
+          renewed.observed_error === null &&
+          renewedWeb.peers.some((peer) => peer.state === "connected"),
+        { checkout: renew.status, row: renewed, web: renewedWeb },
+      );
+
+      const removed = await account.request("DELETE", `v2/hosting/servers/${serverId}`, { confirmName: name });
       deleted = removed.status === 204;
       const gone = await waitFor(
         "VM deleted",
         async () => {
-          const response = await boat("GET", `/sandboxes/${sandboxId}`);
-          const state = sandboxSchema.safeParse(response.body).data?.sandbox.state;
-          return response.status === 404 || state === "deleted" ? { status: response.status, state } : null;
+          const current = await sandbox(sandboxId);
+          return current.status === 404 || current.state === "deleted" ? current : null;
         },
         180_000,
       );
-      record("boat", "delete removes the VM", deleted, {
+      record("boat", "delete removes the VM and cancels the plan", deleted, {
         status: removed.status,
         boat: gone,
-        row: account.row(server.serverId),
+        row: account.row(serverId),
+        plans: await account.billing(),
       });
     } finally {
-      if (!deleted) await account.request("DELETE", `v2/hosting/servers/${server.serverId}`, { confirmName: name });
+      if (!deleted) await account.request("DELETE", `v2/hosting/servers/${serverId}`, { confirmName: name });
     }
   },
 };
@@ -854,7 +1145,7 @@ async function main(args: string[]) {
     return;
   }
   const api = args[args.indexOf("--api") + 1];
-  if (!args.includes("--api") || !api) throw new Error("Pass --api <local Worker origin>.");
+  if (!args.includes("--api") || !api) throw new Error("Pass --api <Worker origin>.");
   const chosen = SCENARIOS.filter((scenario) => args.includes(scenario));
   // A real VM costs money, so `boat` runs only when named.
   const run = chosen.length > 0 ? chosen : SCENARIOS.filter((scenario) => scenario !== "boat");
@@ -868,6 +1159,7 @@ async function main(args: string[]) {
       record(scenario, "scenario finished", false, error instanceof Error ? error.message : String(error));
     }
   }
+  if (chrome) await (await chrome).close();
   // Deleting a test clock deletes its customers and subscriptions.
   for (const clock of clocks)
     await stripe("DELETE", `/v1/test_helpers/test_clocks/${clock}`, idSchema).catch(() => null);
