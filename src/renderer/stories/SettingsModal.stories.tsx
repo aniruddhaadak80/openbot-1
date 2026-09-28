@@ -130,6 +130,8 @@ function SettingsModalStory(props: {
   /** Adds the Hosted servers tab with a stopped server and a server whose plan ended. */
   hostedServers?: boolean;
   initialTab?: SettingsTab;
+  /** A restart that a server admin asked for. */
+  scheduledRestart?: UpdateStatus["scheduledRestart"];
 }) {
   const previousApi = window.openbot;
   const billingApi = createMockBilling();
@@ -152,7 +154,11 @@ function SettingsModalStory(props: {
   });
   const [open, setOpen] = createSignal(props.initialOpen);
   const [value, setValue] = createSignal({ ...DEFAULT_GENERAL_SETTINGS });
-  const [updateStatus, setUpdateStatus] = createSignal<UpdateStatus>(storyUpdateStatus);
+  const [updateStatus, setUpdateStatus] = createSignal<UpdateStatus>(
+    props.scheduledRestart
+      ? { ...storyUpdateStatus, phase: "ready", availableVersion: "0.3.0", scheduledRestart: props.scheduledRestart }
+      : storyUpdateStatus,
+  );
   const [account, setAccount] = createSignal<CentralAuthUser>({ ...storyAccount });
   const [mobileDevices, setMobileDevices] = createSignal<MobileConnectedDevice[]>([
     {
@@ -234,6 +240,10 @@ function SettingsModalStory(props: {
           onValueChange={setValue}
           appInfo={storyAppInfo}
           updateStatus={updateStatus()}
+          onCancelScheduledRestart={async () => {
+            const { scheduledRestart: _cancelled, ...rest } = updateStatus();
+            setUpdateStatus(rest);
+          }}
           account={account()}
           onUpdateAccountName={updateAccountName}
           onUpdateAccountAvatar={updateAccountAvatar}
@@ -461,6 +471,16 @@ export const Billing: Story = {
 /** An account that can create hosted servers. Start, renew and delete change the mock list. */
 export const HostedServers: Story = {
   render: () => <SettingsModalStory initialOpen hostedServers initialTab="hosted-servers" />,
+};
+
+export const ScheduledRemoteUpdate: Story = {
+  render: () => (
+    <SettingsModalStory
+      initialOpen
+      initialTab="updates"
+      scheduledRestart={{ requestedBy: "Ada Lovelace", mode: "when-idle", waitingFor: ["agent-turn"] }}
+    />
+  ),
 };
 
 export const Interactive: Story = {

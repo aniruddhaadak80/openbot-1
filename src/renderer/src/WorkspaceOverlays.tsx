@@ -213,6 +213,7 @@ function ServerSettings() {
     server.kind === "local" ? providerAdminServerId() === undefined : server.id === providerAdminServerId();
   const {
     serverSettingsTarget,
+    serverSettingsSection,
     serverSettingsOpen,
     setServerSettingsOpen,
     serverSettingsRestoreTarget,
@@ -298,6 +299,8 @@ function ServerSettings() {
           onSetMcpServerEnabled={setMcpServerEnabled}
           onTestMcpServer={testMcpServer}
           storage={storageOptions(server())}
+          hostUpdate={{}}
+          initialSection={serverSettingsSection()}
           // Agents import into this computer only; a remote host has no Import section.
           agentImport={
             server().kind === "local"
@@ -390,6 +393,7 @@ function AppSettings(props: AccountProps) {
         appInfo={platform.appInfo()}
         updateStatus={updates.status()}
         onUpdateAction={updates.runAction}
+        onCancelScheduledRestart={updates.cancelScheduledRestart}
         account={props.account()}
         onUpdateAccountName={auth.updateAccountName}
         onUpdateAccountAvatar={auth.updateAccountAvatar}

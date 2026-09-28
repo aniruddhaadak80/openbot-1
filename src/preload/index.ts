@@ -15,6 +15,7 @@ import {
   decodeChannelRoutineRuns,
   decodeChannelRoutines,
   decodeChannelSummaries,
+  decodeHostUpdateStatus,
   decodeMcpServerConfigs,
   decodeMcpTestResult,
   decodeOptionalStorageUsage,
@@ -577,7 +578,14 @@ const openbotApi: OpenBotDesktopApi = {
     saveCustomProvider: decodeCustomProviderResult,
     deleteCustomProvider: decodeCustomProviderResult,
   }),
-  hostAdmin: bridgeGroup(IPC_ENDPOINTS.hostAdmin, { updateIdentity: decodeServer }),
+  hostAdmin: bridgeGroup(IPC_ENDPOINTS.hostAdmin, {
+    updateIdentity: decodeServer,
+    getUpdateStatus: decodeHostUpdateStatus,
+    checkForUpdate: decodeHostUpdateStatus,
+    startUpdate: decodeHostUpdateStatus,
+    cancelUpdate: decodeHostUpdateStatus,
+    setUpdateSettings: decodeHostUpdateStatus,
+  }),
   agentImport: bridgeGroup(IPC_ENDPOINTS.agentImport, {
     choose: decodeAgentImportPreview,
     apply: decodeAgentImportResult,
@@ -707,7 +715,9 @@ const openbotApi: OpenBotDesktopApi = {
     install: decodeVoid,
     getPreference: decodeUpdatePreference,
     setPreference: decodeUpdatePreference,
+    cancelScheduledRestart: decodeUpdateStatus,
     event: decodeUpdateStatus,
+    preference: decodeUpdatePreference,
   }),
   notifications: bridgeGroup(IPC_ENDPOINTS.notifications, {
     getPreference: decodeNotificationPreference,

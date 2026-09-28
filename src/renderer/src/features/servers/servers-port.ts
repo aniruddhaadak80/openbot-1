@@ -19,7 +19,7 @@ export interface ServersPort {
     | "testMcpServer"
   >;
   browser: Pick<OpenBotDesktopApi["browser"], "setVisible">;
-  hostAdmin: Pick<OpenBotDesktopApi["hostAdmin"], "updateIdentity">;
+  hostAdmin: Pick<OpenBotDesktopApi["hostAdmin"], "getUpdateStatus" | "updateIdentity">;
   hostedServers: Pick<OpenBotDesktopApi["hostedServers"], "list">;
   host: Pick<
     OpenBotDesktopApi["host"],

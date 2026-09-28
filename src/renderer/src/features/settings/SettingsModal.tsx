@@ -69,6 +69,7 @@ export interface SettingsModalProps {
   appInfo: AppInfo | null;
   updateStatus: UpdateStatus;
   onUpdateAction: () => Promise<void>;
+  onCancelScheduledRestart?: () => Promise<void>;
   account: CentralAuthUser;
   onUpdateAccountName: (name: string) => Promise<void>;
   onUpdateAccountAvatar: (image: AvatarImageInput | null) => Promise<void>;

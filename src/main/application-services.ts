@@ -126,6 +126,7 @@ import { appendRemoteDiagnosticLog } from "./remote-diagnostics";
 import { decodeVoid } from "./remote-host-decoding";
 import { RemoteServerManager } from "./remote-server-manager";
 import { sendToRenderer } from "./renderer-ipc";
+import { RequestedUpdate, RequestedUpdateRefusal } from "./requested-update";
 import {
   configureApplicationProtocol,
   configureAttachmentProtocol,
@@ -138,7 +139,7 @@ import { TeamWebRtcBridge } from "./team-webrtc-bridge";
 import { TeamWebRtcClientTransport } from "./team-webrtc-client-transport";
 import type { TeardownRegistry } from "./teardown-registry";
 import { TraceFile } from "./trace-file";
-import { readUpdatePreference } from "./update-preference-store";
+import { readUpdatePreference, writeUpdatePreference } from "./update-preference-store";
 import { checkRestartReadiness, type RestartReadiness } from "./update-readiness";
 import {
   createDisabledUpdateAdapter,
@@ -192,8 +193,9 @@ const DEVELOPMENT_BUNDLE_IDENTIFIER = "com.github.Electron";
 const TEARDOWN_ORDER = {
   updater: 10,
   hostUpdateCoordinator: 12,
-  hostedServerStartRetry: 13,
-  hostedServerActivity: 14,
+  requestedUpdate: 13,
+  hostedServerStartRetry: 14,
+  hostedServerActivity: 15,
   computerUseHighlight: 18,
   computerUsePermissionHelp: 19,
   dynamicIsland: 20,
@@ -252,6 +254,8 @@ export interface ApplicationServices {
   /** Point-in-time restart safety for host-managed updates. Nothing holds the instance when empty. */
   describeRestartReadiness: () => RestartReadiness;
   hostUpdateCoordinator: HostUpdateCoordinator;
+  /** The update restart that an admin of a joined server asked for (`host-update-v1`). */
+  requestedUpdate: RequestedUpdate;
   setupFile: string;
   analyticsPreferenceFile: string;
   updatePreferenceFile: string;
@@ -919,6 +923,13 @@ export async function createApplicationServices({
   const agentAdminSettings = createAgentAdminSettings({ agents: service, approvalAutomation });
   const customProviderChanges = createCustomProviderChanges({ service, customProviders });
   const customAgentChanges = createCustomAgentChanges({ service, customAgents });
+  // The host comes before the updater, and the restart readiness reads the host. The routes reach
+  // the schedule through this, and a request that arrives before it exists is refused.
+  let requestedUpdate: RequestedUpdate | undefined;
+  const scheduledUpdate = (): RequestedUpdate => {
+    if (!requestedUpdate) throw new RequestedUpdateRefusal("unsupported");
+    return requestedUpdate;
+  };
   const host = new HostService({
     appVersion: app.getVersion(),
     store: teamStore,
@@ -945,6 +956,13 @@ export async function createApplicationServices({
         credentials: providerCredentials,
         runtimes: providerRuntimes,
         customProviders: customProviderChanges,
+      },
+      update: {
+        snapshot: () => scheduledUpdate().snapshot(),
+        check: () => scheduledUpdate().check(),
+        start: (member, mode) => scheduledUpdate().start(member, mode),
+        cancel: () => scheduledUpdate().cancel(),
+        changeSettings: (change) => scheduledUpdate().changeSettings(change),
       },
     },
     // The host's Team API routes share the IPC handlers' runtime preparation: a first server
@@ -1241,6 +1259,16 @@ export async function createApplicationServices({
       return { ok: true, checks: ["initialization-succeeded", "agent-list"] };
     },
   });
+  requestedUpdate = new RequestedUpdate({
+    updater,
+    describeReadiness: describeRestartReadiness,
+    preference: updatePreference,
+    savePreference: (change) => writeUpdatePreference(updatePreferenceFile, change),
+    log: (message) => logger.info(message),
+    announce: (state, version) => host.announceRestart(state, version),
+  });
+  const remoteUpdate = requestedUpdate;
+  teardown.push(TEARDOWN_ORDER.requestedUpdate, "the requested update", () => remoteUpdate.dispose());
   if (hostedServer) {
     const hostedServerStartRetry = new HostedServerStartRetry({
       hostPhase: () => host.getStatus().phase,
@@ -1291,6 +1319,7 @@ export async function createApplicationServices({
     notificationPreference,
     agentInitialization,
     hostUpdateCoordinator,
+    requestedUpdate: remoteUpdate,
     describeRestartReadiness,
     sidebarLayout,
     host,

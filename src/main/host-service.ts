@@ -37,6 +37,7 @@ import type {
   UpdateTeamMemberInput,
 } from "@openbot/contracts/ipc";
 import { SIGNED_OUT_CHANNEL_MEMBER_ID } from "@openbot/contracts/ipc";
+import type { HostRestartState } from "@openbot/contracts/team-protocol/host-update-v1";
 import { sourceText } from "@openbot/i18n/source";
 import { createOpenBotLogger, toLogValue } from "@openbot/logging";
 import type { AgentService } from "../backend/agent-service";
@@ -737,6 +738,10 @@ export class HostService extends EventEmitter<HostEvents> {
 
   connectedClientCount(): number {
     return this.#api.connectedClientCount();
+  }
+
+  announceRestart(state: HostRestartState, version: string | null): void {
+    this.#api.announceHostRestart(state, version);
   }
 
   setTyping(input: SetTeamTypingInput): void {
