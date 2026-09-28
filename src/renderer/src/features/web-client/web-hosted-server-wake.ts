@@ -1,22 +1,27 @@
 import { type HostedServerState, parseHostedServerSummary } from "@openbot/contracts/hosted-servers";
 
-/** A hosted server in one of these states comes online without a user action, so the client reconnects. */
-const WAKE_TRANSITION_STATES: ReadonlySet<HostedServerState> = new Set(["creating", "starting", "waking"]);
+/**
+ * A hosted server in one of these states comes online without a user action, so the client reconnects.
+ * A `running` server whose host is offline is still starting OpenBot, or it restarts.
+ */
+const WAKE_RECONNECT_STATES: ReadonlySet<HostedServerState> = new Set(["creating", "starting", "waking", "running"]);
 /** The reconnects for one start. With the 5 second delay of the caller, this is about 5 minutes. */
 const MAX_WAKE_ATTEMPTS = 60;
 /** A host that is not a hosted server stays so. It is asked again after this long, not on each failure. */
 const NOT_HOSTED_RECHECK_MS = 10 * 60_000;
+/** A failure after this long with no wake request is a new outage, so its reconnects count from zero. */
+const NEW_OUTAGE_MS = 2 * 60_000;
 
 /**
  * Starts a stopped hosted server when a connection to it fails. The account server answers 404 for
  * any other host, so the web client can ask for each offline host. It returns true while the server
- * starts, so the caller reconnects until the server is online. It returns false when the server does
- * not start by itself, or after `MAX_WAKE_ATTEMPTS` replies for one start.
+ * starts or runs, so the caller reconnects until the host is online. It returns false when the server
+ * does not start by itself, or after `MAX_WAKE_ATTEMPTS` replies in one outage.
  */
 export function createWebHostedServerWake(accountFetch: typeof fetch, now: () => number = Date.now) {
   const notHostedAt = new Map<string, number>();
-  /** The transition replies in a row for each host. */
-  const attempts = new Map<string, number>();
+  /** The reconnect replies in a row for each host, and when the last one came. */
+  const attempts = new Map<string, { count: number; at: number }>();
   /** When the reconnects of a host stopped at the limit. The host is asked again after the recheck time. */
   const gaveUpAt = new Map<string, number>();
   /** A failed connection reports itself twice, so both reports share one request. */
@@ -58,18 +63,18 @@ export function createWebHostedServerWake(accountFetch: typeof fetch, now: () =>
       return false;
     }
     const server = parseHostedServerSummary(await response.json().catch(() => null));
-    const previous = attempts.get(hostId) ?? 0;
-    if (server && WAKE_TRANSITION_STATES.has(server.state)) {
-      if (previous >= MAX_WAKE_ATTEMPTS) {
-        attempts.delete(hostId);
-        gaveUpAt.set(hostId, time);
-        return false;
-      }
-      attempts.set(hostId, previous + 1);
-      return true;
+    if (!server || !WAKE_RECONNECT_STATES.has(server.state)) {
+      attempts.delete(hostId);
+      return false;
     }
-    attempts.delete(hostId);
-    // A server that just started gets one more reconnect, because its host connects a moment after the start.
-    return server?.state === "running" && previous > 0;
+    const last = attempts.get(hostId);
+    const previous = last && time - last.at < NEW_OUTAGE_MS ? last.count : 0;
+    if (previous >= MAX_WAKE_ATTEMPTS) {
+      attempts.delete(hostId);
+      gaveUpAt.set(hostId, time);
+      return false;
+    }
+    attempts.set(hostId, { count: previous + 1, at: time });
+    return true;
   }
 }
