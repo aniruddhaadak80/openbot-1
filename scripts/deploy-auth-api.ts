@@ -6,30 +6,18 @@ import { createOpenBotLogger, toLogValue } from "@openbot/logging";
 const logger = createOpenBotLogger("deploy-auth-api");
 
 const scriptsRoot = dirname(fileURLToPath(import.meta.url));
-const apiRoot = join(scriptsRoot, "..", "apps", "auth-api");
+const projectRoot = join(scriptsRoot, "..");
+const apiRoot = join(projectRoot, "apps", "auth-api");
 const executableSuffix = process.platform === "win32" ? ".exe" : "";
 const bunExecutable = process.execPath;
-const wranglerExecutable = join(apiRoot, "node_modules", ".bin", `wrangler${executableSuffix}`);
+// Bun installs the workspace binaries at the repository root.
+const wranglerExecutable = join(projectRoot, "node_modules", ".bin", `wrangler${executableSuffix}`);
 const cloudflareEnvironment = readCloudflareEnvironment(process.argv.slice(2));
 const environmentArgs = cloudflareEnvironment ? ["--env", cloudflareEnvironment] : [];
 
 async function main(): Promise<void> {
-  const smtpPassword = process.env.EMAIL_SMTP_PASSWORD;
-  if (!smtpPassword?.trim()) {
-    throw new Error("EMAIL_SMTP_PASSWORD is missing from the decrypted production environment.");
-  }
-  const skillsAdminToken = process.env.SKILLS_ADMIN_TOKEN;
-  if (!skillsAdminToken?.trim()) {
-    throw new Error("SKILLS_ADMIN_TOKEN is missing from the decrypted production environment.");
-  }
-  await run(wranglerExecutable, ["secret", "put", "EMAIL_SMTP_PASSWORD", ...environmentArgs], {
-    input: `${smtpPassword}\n`,
-    label: "Cloudflare SMTP secret",
-  });
-  await run(wranglerExecutable, ["secret", "put", "SKILLS_ADMIN_TOKEN", ...environmentArgs], {
-    input: `${skillsAdminToken}\n`,
-    label: "Skills marketplace admin secret",
-  });
+  await putRequiredSecret("EMAIL_SMTP_PASSWORD");
+  await putRequiredSecret("SKILLS_ADMIN_TOKEN");
   await putRequiredSecret("SITE_REPORT_HASH_SECRET");
   await putRequiredSecret("REMOTE_TICKET_PRIVATE_JWK");
   await putRequiredSecret("REMOTE_TICKET_PUBLIC_JWKS");
@@ -50,6 +38,8 @@ async function main(): Promise<void> {
 async function putRequiredSecret(name: string): Promise<void> {
   const value = process.env[name];
   if (!value?.trim()) throw new Error(`${name} is missing from the decrypted production environment.`);
+  // dotenvx keeps the ciphertext when .env.keys has no matching private key.
+  if (value.startsWith("encrypted:")) throw new Error(`${name} is not decrypted. Check the private key in .env.keys.`);
   await run(wranglerExecutable, ["secret", "put", name, ...environmentArgs], {
     input: `${value}\n`,
     label: `${name} secret`,
