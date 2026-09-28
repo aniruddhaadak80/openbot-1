@@ -99,8 +99,10 @@ function tickHostedServers(
     Partial<Pick<WorkerBindings, HostedServerTickBindingKey>>,
   now: number,
 ) {
+  const remote = new RemoteControlPlane(bindings);
   return createHostedBilling(bindings, {
-    removeHost: (ownerUserId, hostId) => new RemoteControlPlane(bindings).deleteHost(ownerUserId, hostId),
+    removeHost: (ownerUserId, hostId) => remote.deleteHost(ownerUserId, hostId),
+    planChanged: (hostId) => remote.planChanged(hostId),
   })
     .hosting.tick(now)
     .catch(() => {

@@ -6,3 +6,6 @@
 - Each server has a menu to change or cancel its plan, or to renew a plan that ends. Payment method
   and invoices opens the Stripe Customer Portal. You enter card details on the Stripe page, not in
   OpenBot.
+- The plan of a server sets its member limit: Starter 3, Standard 10 and Pro 25 active members,
+  owner included. A server with no plan keeps 3. When a plan goes down or ends, no member is
+  removed, but no new member can join until there is a free seat.

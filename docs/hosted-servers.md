@@ -88,6 +88,21 @@ States: `awaiting_payment → creating → starting → running`; `running → s
    for a deleted server. Then it deletes the sandbox and its Remote host. The D1 row stays with `desired_state = 'deleted'`, so a sandbox is never
    left without a record.
 
+## Members
+
+The plan sets the number of active members, owner included: Starter 3, Standard 10 and Pro 25
+(`BILLING_PLANS`). A host with no plan has 3 (`DEFAULT_TEAM_MEMBER_LIMIT`). The Worker reads the plan
+with `getServerEntitlement` when a member joins or is reactivated, and refuses a member over the limit
+(`409 member_limit_reached`). This also applies to a self-hosted host that has a plan.
+
+- A lower limit after a plan change or a plan end removes no one. Active members keep their seats.
+  A new join or a reactivation waits for a free seat.
+- The host list (`GET /v2/remote/hosts/`) gives `memberLimit` for each host. The desktop, web and
+  mobile member screens show it. They use 3 when an older Worker sends no limit.
+- After each subscription sync, the Worker sends `account-servers-changed` to each active member,
+  so their devices read the host list, and the new limit, again.
+- A host that is not on an account keeps 3 in its own store (`src/main/team-store.ts`). It has no plan.
+
 ## Configure the test Worker
 
 `HOSTED_SERVERS_ENABLED` is `true` in `env.test` of `apps/auth-api/wrangler.jsonc`. Set the rest
@@ -186,7 +201,9 @@ These were not tested on boat. Test them before a user gets access:
 - the vCPU, memory and disk of boat `large`;
 - a downgrade that boat refuses with `type_too_small`. The test uses a fake boat;
 - the disk of each size. The root file system showed 69 GB on `small` and on `default`, not the 12 GB
-  and 50 GB of the boat machine table. The limit that `type_too_small` uses is not known;
+  and 50 GB of the boat machine table. The limit that `type_too_small` uses is not known. The plans
+  show 12, 50 and 100 GB, which is not more than the machine table. The disk of `large` was not
+  measured, so the 100 GB of Pro is not confirmed;
 - that boat frees the key of a refused create, so a retry of a setup that failed works;
 - whether boat stops a sandbox that runs for weeks. The Worker restarts it, but work in progress
   at that time stops.

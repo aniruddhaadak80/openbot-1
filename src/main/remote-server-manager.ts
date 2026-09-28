@@ -140,6 +140,8 @@ export class RemoteServerManager extends EventEmitter<RemoteServerEvents> {
   #duplicateOperationIds = new Map<string, string>();
   readonly #webrtcTransport: TeamWebRtcClientTransport | null;
   readonly #getLocalHostId: () => string | null;
+  /** From the last host list. Null before one, or when this computer hosts nothing that the account lists. */
+  #localMemberLimit: number | null = null;
   readonly #onHostUnavailable: (serverId: string) => void;
   readonly #remoteViewerProxy: RemoteViewerProxy | null;
   #selectChain = Promise.resolve();
@@ -280,8 +282,11 @@ export class RemoteServerManager extends EventEmitter<RemoteServerEvents> {
   }
 
   list(): ServerSummary[] {
-    return remoteServerSummaries(this.#store.servers, this.#store.activeServerId, (serverId) =>
-      this.#connections.statusFor(serverId),
+    return remoteServerSummaries(
+      this.#store.servers,
+      this.#store.activeServerId,
+      (serverId) => this.#connections.statusFor(serverId),
+      this.#localMemberLimit,
     ).map((server) => {
       const mute = this.#store.muteState(server.id);
       return {
@@ -1094,12 +1099,15 @@ export class RemoteServerManager extends EventEmitter<RemoteServerEvents> {
   async #syncWebRtcHosts(): Promise<void> {
     const transport = this.#webrtcTransport;
     if (!transport) return;
+    const hosts = await transport.listHosts();
+    const localHostId = this.#getLocalHostId();
+    this.#localMemberLimit = hosts.find((host) => host.hostId === localHostId)?.memberLimit ?? null;
     const { servers, removedHostIds, staleTransportHostIds, pinnedKeys } = reconcileWebRtcHosts({
-      hosts: await transport.listHosts(),
+      hosts,
       isConnected: (hostId) => transport.isConnected(hostId),
       servers: this.#store.servers,
       preservedIdentities: this.#store.preservedIdentities,
-      localHostId: this.#getLocalHostId(),
+      localHostId,
       isHiddenHost: (hostId) => this.#store.isHiddenHost(hostId),
       username: this.#centralAccount.getEmail().trim().toLowerCase(),
       keepOtherTransports: this.#allowLocalDevelopmentInvites,

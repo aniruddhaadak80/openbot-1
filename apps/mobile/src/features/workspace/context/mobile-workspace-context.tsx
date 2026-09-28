@@ -251,6 +251,7 @@ export function MobileWorkspaceProvider({ children }: PropsWithChildren) {
             publicKey: previous?.publicKey ?? host.devicePublicKey,
             membershipId: host.membershipId,
             role: host.role,
+            ...(host.memberLimit === undefined ? {} : { memberLimit: host.memberLimit }),
           };
         });
       });
@@ -903,6 +904,7 @@ export function MobileWorkspaceProvider({ children }: PropsWithChildren) {
             publicKey: host.devicePublicKey,
             membershipId: host.membershipId,
             role: host.role,
+            ...(host.memberLimit === undefined ? {} : { memberLimit: host.memberLimit }),
           },
         ]);
         setActiveServerId(host.hostId);

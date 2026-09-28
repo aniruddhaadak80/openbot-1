@@ -172,9 +172,10 @@ export function requestHostedServerService(): HostedServerService {
 
 function requestHostedBilling() {
   const bindings = requireWorkerBindings(env);
+  const remote = new RemoteControlPlane(bindings, { schedule: waitUntil });
   return createHostedBilling(bindings, {
-    removeHost: (ownerUserId, hostId) =>
-      new RemoteControlPlane(bindings, { schedule: waitUntil }).deleteHost(ownerUserId, hostId),
+    removeHost: (ownerUserId, hostId) => remote.deleteHost(ownerUserId, hostId),
+    planChanged: (hostId) => remote.planChanged(hostId),
   });
 }
 

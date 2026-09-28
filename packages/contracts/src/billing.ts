@@ -32,7 +32,7 @@ export const BILLING_SUBSCRIPTION_STATUSES: readonly BillingSubscriptionStatus[]
 export interface BillingPlan {
   id: BillingPlanId;
   storageGb: number;
-  /** The number of active members that the plan shows. Not enforced yet: every host has the default limit. */
+  /** The number of active members of a server with this plan. The account server enforces it. */
   memberLimit: number;
   /** The speed of the plan's machine, where Starter is 1. */
   relativeSpeed: number;
@@ -44,6 +44,11 @@ export const BILLING_PLANS: readonly BillingPlan[] = [
   { id: "standard", storageGb: 50, memberLimit: 10, relativeSpeed: 2 },
   { id: "pro", storageGb: 100, memberLimit: 25, relativeSpeed: 4 },
 ];
+
+/** The active member limit of a server with this plan, or with no plan. */
+export function memberLimitForPlan(plan: BillingPlanId | null): number {
+  return BILLING_PLANS.find((candidate) => candidate.id === plan)?.memberLimit ?? DEFAULT_TEAM_MEMBER_LIMIT;
+}
 
 /**
  * The Stripe subscription metadata that links a subscription to an OpenBot account and server. The

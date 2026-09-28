@@ -15,7 +15,10 @@ export type HostedBillingBindings = HostedServerBindings &
  */
 export function createHostedBilling(
   bindings: HostedBillingBindings,
-  options: Pick<HostedServerServiceOptions, "removeHost">,
+  options: Pick<HostedServerServiceOptions, "removeHost"> & {
+    /** Tells the members of a host that its plan, and so its member limit, can be different. */
+    planChanged: (hostId: string) => Promise<void>;
+  },
 ): { billing: BillingService | null; hosting: HostedServerService } {
   const secretKey = bindings.STRIPE_SECRET_KEY?.trim();
   const billing = secretKey
@@ -24,7 +27,10 @@ export function createHostedBilling(
         secretKey,
         webhookSecret: bindings.STRIPE_WEBHOOK_SECRET?.trim() || null,
         fetch: (input, init) => fetch(input, init),
-        onSubscriptionSynced: (sync) => hosting.onSubscriptionSynced(sync),
+        onSubscriptionSynced: async (sync) => {
+          await hosting.onSubscriptionSynced(sync);
+          await options.planChanged(sync.serverId);
+        },
       })
     : null;
   const hosting = new HostedServerService(bindings, { removeHost: options.removeHost, billing });
