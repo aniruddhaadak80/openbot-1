@@ -1,6 +1,11 @@
 import { createHmac } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import { BILLING_CURRENCIES, BILLING_INTERVALS, BILLING_PLAN_IDS } from "@openbot/contracts/billing";
+import {
+  BILLING_CURRENCIES,
+  BILLING_INTERVALS,
+  BILLING_PLAN_IDS,
+  type BillingPlanId,
+} from "@openbot/contracts/billing";
 import { isDynamicRecord, isString } from "@openbot/contracts/runtime-values";
 import { exportJWK, generateKeyPair } from "jose";
 import { afterEach, describe, expect, it } from "vitest";
@@ -112,8 +117,14 @@ async function setup() {
     return { deliveryId, timestamp, signature, body };
   };
   /** Stripe stores the subscription in this state and sends the webhook. */
-  const stripeSync = (subscriptionId: string, status: string, serverId: string, customer = "cus_1") => {
-    stripe.subscriptions.set(subscriptionId, subscription(subscriptionId, status, serverId, customer, clock.now));
+  const stripeSync = (
+    subscriptionId: string,
+    status: string,
+    serverId: string,
+    customer = "cus_1",
+    plan: BillingPlanId = "starter",
+  ) => {
+    stripe.subscriptions.set(subscriptionId, subscription(subscriptionId, status, serverId, customer, clock.now, plan));
     delivery += 1;
     const payload = JSON.stringify({
       id: `evt_stripe_${delivery}`,
@@ -235,7 +246,7 @@ describe("hosted servers", () => {
     // The claim lifetime counts from the payment, not from the create request.
     const second = await context.service.create(owner, { ...STARTER, plan: "pro" }, "create-key-0000002", RETURN);
     context.clock.now += 2 * 60 * MINUTE;
-    await context.stripeSync("sub_2", "active", second.server.serverId);
+    await context.stripeSync("sub_2", "active", second.server.serverId, "cus_1", "pro");
     expect(context.sandboxCreates().at(-1)?.body).toMatchObject({ type: "large" });
     const secondClaim = context.claims.at(-1) ?? "";
     context.clock.now += 61 * MINUTE;
@@ -479,6 +490,8 @@ class FakeStripe {
       this.customersCreated += 1;
       return Response.json({ id: `cus_${this.customersCreated}` });
     }
+    const customer = /^\/v1\/customers\/([^/]+)$/u.exec(url.pathname)?.[1];
+    if (method === "GET" && customer) return Response.json({ id: customer });
     if (method === "POST" && url.pathname === "/v1/checkout/sessions") {
       this.checkouts.push(body);
       const id = `cs_${this.checkouts.length}`;
@@ -526,7 +539,14 @@ function prices() {
   );
 }
 
-function subscription(id: string, status: string, serverId: string, customer: string, now: number) {
+function subscription(
+  id: string,
+  status: string,
+  serverId: string,
+  customer: string,
+  now: number,
+  plan: BillingPlanId,
+) {
   return {
     id,
     customer,
@@ -539,8 +559,8 @@ function subscription(id: string, status: string, serverId: string, customer: st
         {
           current_period_end: Math.floor(now / 1_000) + 30 * 86_400,
           price: {
-            id: "price_starter_month",
-            lookup_key: "openbot_starter_month",
+            id: `price_${plan}_month`,
+            lookup_key: `openbot_${plan}_month`,
             currency: "eur",
             unit_amount: 2_000,
           },

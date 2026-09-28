@@ -32,7 +32,7 @@ const stripeErrorSchema = z.object({
 });
 
 const sessionSchema = z.object({ id: z.string(), url: z.string().nullable() });
-const customerSchema = z.object({ id: z.string() });
+const customerSchema = z.object({ id: z.string(), deleted: z.boolean().optional() });
 const checkoutSessionSchema = z.object({ id: z.string(), url: z.string().nullable(), status: z.string().nullable() });
 
 const priceSchema = z.object({
@@ -52,6 +52,8 @@ const subscriptionSchema = z.object({
   status: z.string(),
   currency: z.string(),
   cancel_at_period_end: z.boolean(),
+  // A cancel at a set time, for example from the Customer Portal. Null when no cancel is set.
+  cancel_at: z.number().int().nullable().optional(),
   metadata: z.record(z.string(), z.string()).default({}),
   // Before API version 2025-03-31 the period end was on the subscription; it is now on each item.
   current_period_end: z.number().int().optional(),
@@ -136,6 +138,12 @@ export class StripeClient {
   async createCustomer(input: { userId: string; email: string }, idempotencyKey: string): Promise<string> {
     const body = new URLSearchParams({ email: input.email, [`metadata[${BILLING_METADATA.userId}]`]: input.userId });
     return (await this.request("POST", "/v1/customers", body, customerSchema, idempotencyKey)).id;
+  }
+
+  /** True when the customer was deleted in Stripe. Stripe still returns a deleted customer, with `deleted`. */
+  async isCustomerDeleted(customerId: string): Promise<boolean> {
+    const path = `/v1/customers/${encodeURIComponent(customerId)}`;
+    return (await this.request("GET", path, null, customerSchema)).deleted === true;
   }
 
   /**

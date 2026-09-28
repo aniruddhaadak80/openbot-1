@@ -42,6 +42,8 @@ export const BILLING_WEBHOOK_EVENTS = [
   "customer.subscription.deleted",
   "customer.subscription.paused",
   "customer.subscription.resumed",
+  "customer.subscription.pending_update_applied",
+  "customer.subscription.pending_update_expired",
   "invoice.paid",
   "invoice.payment_failed",
   "checkout.session.expired",
@@ -80,7 +82,7 @@ class StripeAdmin {
   constructor(private readonly secretKey: string) {}
 
   async request<T>(
-    method: "GET" | "POST",
+    method: "GET" | "POST" | "DELETE",
     path: string,
     body: URLSearchParams | null,
     schema: z.ZodType<T>,
@@ -184,32 +186,62 @@ async function ensurePrice(
 }
 
 /**
- * Portal sessions use the default configuration, and the API cannot create a default one: Stripe makes
- * it when someone saves the Customer Portal settings in the Dashboard. So this updates it only.
+ * Portal sessions use the default configuration, and the API cannot create a default one. Stripe makes
+ * it for the first Portal session, so this opens one session for a temporary customer and deletes it.
  */
-async function updatePortalConfiguration(
-  stripe: StripeAdmin,
-  prices: Record<BillingPlanId, string[]>,
-): Promise<boolean> {
-  const list = await stripe.request(
-    "GET",
-    "/v1/billing_portal/configurations?is_default=true&limit=1",
-    null,
-    portalConfigurationListSchema,
+async function defaultPortalConfiguration(stripe: StripeAdmin): Promise<string> {
+  const find = async () =>
+    (
+      await stripe.request(
+        "GET",
+        "/v1/billing_portal/configurations?is_default=true&limit=1",
+        null,
+        portalConfigurationListSchema,
+      )
+    ).data[0]?.id ?? null;
+  const existing = await find();
+  if (existing) return existing;
+  const customer = await stripe.request(
+    "POST",
+    "/v1/customers",
+    new URLSearchParams({ description: "OpenBot bootstrap: creates the default Customer Portal configuration" }),
+    z.object({ id: z.string() }),
   );
-  const configuration = list.data[0];
-  if (!configuration) return false;
+  try {
+    await stripe.request(
+      "POST",
+      "/v1/billing_portal/sessions",
+      new URLSearchParams({ customer: customer.id, return_url: "https://openbot.run" }),
+      z.object({ id: z.string() }),
+    );
+  } finally {
+    await stripe.request("DELETE", `/v1/customers/${customer.id}`, null, z.object({ id: z.string() }));
+  }
+  const created = await find();
+  if (!created) throw new Error("Stripe did not create the default Customer Portal configuration.");
+  logger.info("Created the default Customer Portal configuration.");
+  return created;
+}
+
+async function updatePortalConfiguration(stripe: StripeAdmin, prices: Record<BillingPlanId, string[]>): Promise<void> {
+  const configuration = { id: await defaultPortalConfiguration(stripe) };
   const body = new URLSearchParams({
     "features[invoice_history][enabled]": "true",
     "features[payment_method_update][enabled]": "true",
     "features[subscription_cancel][enabled]": "true",
     "features[subscription_cancel][mode]": "at_period_end",
     "features[subscription_update][enabled]": "true",
-    "features[subscription_update][proration_behavior]": "create_prorations",
+    // An upgrade gives the larger server now, so it is charged now. A downgrade or a shorter interval
+    // starts at the next period, which the user already paid for.
+    "features[subscription_update][proration_behavior]": "always_invoice",
+    "features[subscription_update][schedule_at_period_end][conditions][0][type]": "decreasing_item_amount",
+    "features[subscription_update][schedule_at_period_end][conditions][1][type]": "shortening_interval",
   });
   body.append("features[subscription_update][default_allowed_updates][]", "price");
   BILLING_PLAN_IDS.forEach((plan, index) => {
     body.set(`features[subscription_update][products][${index}][product]`, productId(plan));
+    // One subscription pays for one server, so the quantity stays 1.
+    body.set(`features[subscription_update][products][${index}][adjustable_quantity][enabled]`, "false");
     for (const price of prices[plan]) body.append(`features[subscription_update][products][${index}][prices][]`, price);
   });
   await stripe.request(
@@ -219,7 +251,6 @@ async function updatePortalConfiguration(
     z.object({ id: z.string() }),
   );
   logger.info("Updated the default Customer Portal configuration.");
-  return true;
 }
 
 /** Returns the signing secret when this call created the endpoint, and null when it updated one. */
@@ -284,7 +315,7 @@ async function main(args: readonly string[]): Promise<void> {
 
   for (const plan of BILLING_PLAN_IDS) logger.info(`Prices ${productId(plan)}: ${prices[plan].join(", ")}`);
 
-  const portalUpdated = await updatePortalConfiguration(stripe, prices);
+  await updatePortalConfiguration(stripe, prices);
   const lines: string[] = [];
   const webhookSecret = webhookUrl ? await ensureWebhookEndpoint(stripe, webhookUrl) : null;
   if (webhookSecret) {
@@ -296,12 +327,6 @@ async function main(args: readonly string[]): Promise<void> {
       "Webhook endpoint: add --webhook-url <account server origin>/v1/stripe/webhook",
       "Local development: stripe listen --forward-to localhost:<port>/v1/stripe/webhook",
       "Put the signing secret in STRIPE_WEBHOOK_SECRET.",
-    );
-  }
-  if (!portalUpdated) {
-    lines.push(
-      "No default Customer Portal configuration exists yet. Save the Customer Portal settings once in the",
-      "Stripe Dashboard (Settings > Billing > Customer portal), then run this script again.",
     );
   }
   for (const line of lines) logger.info(line);

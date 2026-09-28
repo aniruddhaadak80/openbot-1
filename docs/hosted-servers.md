@@ -64,8 +64,17 @@ States: `awaiting_payment → creating → starting → running`; `running → s
    sandbox. boat saves the disk; the Worker never deletes it. "Renew plan" in Settings calls the
    checkout route: the Worker makes a new plan only when no open plan exists for the server. With
    an open, unpaid plan it answers `409 hosted_server_payment_due`, and the user pays in the Billing
-   Customer Portal. When the plan is open again, the Worker resumes the sandbox.
-8. **Delete.** `DELETE /v2/hosting/servers/:id` with `{confirmName}`. The Worker first cancels the
+   Customer Portal. When the plan is open again, the Worker resumes the sandbox. A server whose setup
+   failed has no sandbox: a renewed plan sets it up again.
+
+   After a failed renewal, Stripe moves the period end forward and retries the payment, so the
+   server keeps running while the plan is `past_due`. When Stripe stops the retries, it cancels the
+   plan and the server stops. A cancel at the period end (`cancel_at_period_end` or `cancel_at`)
+   shows the end date and keeps the server running until then.
+8. **Plan change.** In the Customer Portal an upgrade is charged at once, and a downgrade or a
+   shorter interval starts at the next period. The Worker copies the new plan, interval and currency
+   to the server. It changes the size only while the server has no sandbox.
+9. **Delete.** `DELETE /v2/hosting/servers/:id` with `{confirmName}`. The Worker first cancels the
    open plan now, with no refund. A Stripe failure stops the delete (502), so the user does not pay
    for a deleted server. Then it deletes the sandbox and its Remote host. The D1 row stays with `desired_state = 'deleted'`, so a sandbox is never
    left without a record.
@@ -130,7 +139,8 @@ These were not tested on boat. Test them before a user gets access:
 - a lost response to the boat create call. The idempotency key is the host ID, so a retry returns
   the same sandbox, but no retry runs by itself;
 - the vCPU, memory and disk of boat `large`;
-- a plan change in the Customer Portal. The plan changes, but the sandbox keeps its size;
+- a plan change of a server that has a sandbox. The plan changes, but the sandbox keeps its size,
+  and a downgrade does not make the disk smaller;
 - a provision error with an open plan. The Worker does not try again; the user can delete the
   server, which cancels the plan;
 - whether boat stops a sandbox that runs for weeks. The Worker restarts it, but work in progress

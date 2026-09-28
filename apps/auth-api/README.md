@@ -25,8 +25,8 @@ Stripe keys. A value in `.env.dev` overrides the shared value. To change a value
 
 `bun run api:stripe:bootstrap` creates the six plan Prices (lookup keys `openbot_{plan}_{month|year}`)
 and the Customer Portal settings in the Stripe account of `STRIPE_SECRET_KEY`. It is safe to run
-again: a changed amount makes a new Price and moves the lookup key to it. After the first run, save
-the Customer Portal settings once in the Stripe Dashboard.
+again: a changed amount makes a new Price and moves the lookup key to it. In the Portal, an upgrade
+is charged at once, and a downgrade or a shorter interval starts at the next period.
 
 For a local Worker, forward the webhooks and put the secret that `stripe listen` prints in your
 own `.env.dev` as `STRIPE_WEBHOOK_SECRET`:
@@ -42,6 +42,21 @@ prints the signing secret one time; put it in `.env.shared`:
 bun run api:stripe:bootstrap -- --webhook-url https://<test Worker origin>/v1/stripe/webhook
 bunx dotenvx set STRIPE_WEBHOOK_SECRET <whsec_...> -f apps/auth-api/.env.shared -fk .env.keys
 ```
+
+`scripts/stripe-flows-e2e.ts` checks the plan flows against the sandbox and a local Worker: renewal,
+failed renewal, cancel at the period end, plan change, renew, delete, another account's server, and a
+deleted customer. Each scenario uses a Stripe test clock and deletes it at the end. Start the Worker
+with `HOSTED_SERVERS_ENABLED=true` and `HOSTED_SERVERS_ALLOWED_USER_IDS` set to the output of
+`bun scripts/stripe-flows-e2e.ts --print-user-ids`, and forward the webhooks to it. Then, from the
+repository root:
+
+```bash
+bunx dotenvx run -q -f apps/auth-api/.env.shared -fk .env.keys -- \
+  bun scripts/stripe-flows-e2e.ts --api http://127.0.0.1:<port> [scenario ...]
+```
+
+The `portal` scenario prints a Customer Portal cancel page and then an update page, and waits until
+you use them. The report goes to `.openbot-build/stripe-flows-e2e.json`.
 
 `bun run api:deploy:test` reads `.env.shared` before `.env.production`. The first file wins, so the
 test Worker gets the sandbox keys, never live keys.

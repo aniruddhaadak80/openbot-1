@@ -270,7 +270,8 @@ export class HostedServerService {
       if (isOpenBillingStatus(sync.status)) await this.#billing?.cancelSubscription(sync.subscriptionId);
       return;
     }
-    await this.#applyPlan(row);
+    if (isOpenBillingStatus(sync.status)) await this.#followPlan(row, sync);
+    await this.#applyPlan(await this.#requireRow(row.server_id));
   }
 
   async delete(user: AuthUser, serverId: string, confirmName: unknown): Promise<void> {
@@ -561,6 +562,22 @@ export class HostedServerService {
     return { server: summary(await this.#requireRow(row.server_id)), checkoutUrl: session.url };
   }
 
+  /**
+   * Stores a plan change from the Customer Portal, so the list and a renewal use the plan that the
+   * owner pays for. The size changes only for a server with no sandbox: the provider does not resize one.
+   */
+  async #followPlan(row: HostedServerRow, sync: SubscriptionSync): Promise<void> {
+    if (row.plan === sync.plan && row.billing_interval === sync.interval && row.currency === sync.currency) return;
+    await this.#database
+      .prepare(
+        `UPDATE hosted_servers SET plan = ?, billing_interval = ?, currency = ?,
+           size = CASE WHEN provider_sandbox_id IS NULL THEN ? ELSE size END, updated_at = ?
+         WHERE server_id = ? AND desired_state != 'deleted'`,
+      )
+      .bind(sync.plan, sync.interval, sync.currency, HOSTED_PLAN_SIZE[sync.plan], this.#now(), row.server_id)
+      .run();
+  }
+
   /** Makes the server match its plan. `getServerEntitlement` is the only place that decides the plan. */
   async #applyPlan(row: HostedServerRow): Promise<"provisioned" | "renewed" | "stopped" | null> {
     if (row.desired_state === "deleted") return null;
@@ -635,8 +652,23 @@ export class HostedServerService {
     }
   }
 
-  /** The plan of a stopped server is open again, so the server starts with its data. */
+  /**
+   * The plan of a stopped server is open again, so the server starts with its data. A server whose first
+   * setup failed has no sandbox and no data, so it is set up again.
+   */
   async #renew(row: HostedServerRow): Promise<void> {
+    if (!row.provider_sandbox_id) {
+      const reset = await this.#database
+        .prepare(
+          `UPDATE hosted_servers SET desired_state = 'running', observed_state = 'awaiting_payment',
+             observed_error = NULL, updated_at = ?
+           WHERE server_id = ? AND desired_state = 'stopped' AND provider_sandbox_id IS NULL`,
+        )
+        .bind(this.#now(), row.server_id)
+        .run();
+      if (reset.meta.changes === 1) await this.#provision(await this.#requireRow(row.server_id));
+      return;
+    }
     const renewed = await this.#database
       .prepare(
         `UPDATE hosted_servers SET desired_state = 'running', checkout_session_id = NULL,

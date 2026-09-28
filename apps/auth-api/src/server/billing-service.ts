@@ -76,6 +76,10 @@ export interface SubscriptionSync {
   userId: string;
   serverId: string;
   status: BillingSubscriptionStatus;
+  /** The plan of the subscription now. A Customer Portal change can move it to another plan or interval. */
+  plan: BillingPlanId;
+  interval: BillingInterval;
+  currency: BillingCurrency;
 }
 
 export interface BillingServiceOptions {
@@ -150,18 +154,28 @@ export class BillingService {
    */
   async ensureCustomer(user: { id: string; email: string }): Promise<string> {
     const existing = await this.#customerId(user.id);
-    if (existing) return existing;
+    // A customer deleted in the Stripe Dashboard cannot pay, so the account gets a new one.
+    if (existing && !(await this.#stripeCall(() => this.#stripe.isCustomerDeleted(existing)))) return existing;
     const created = await this.#stripeCall(() =>
-      this.#stripe.createCustomer({ userId: user.id, email: user.email }, `openbot-customer-${user.id}`),
+      this.#stripe.createCustomer(
+        { userId: user.id, email: user.email },
+        existing ? `openbot-customer-${user.id}-after-${existing}` : `openbot-customer-${user.id}`,
+      ),
     );
     const now = this.#now();
-    await this.#database
-      .prepare(
-        `INSERT INTO billing_customers(user_id, stripe_customer_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`,
-      )
-      .bind(user.id, created, now, now)
-      .run();
+    const store = existing
+      ? this.#database
+          .prepare(
+            "UPDATE billing_customers SET stripe_customer_id = ?, updated_at = ? WHERE user_id = ? AND stripe_customer_id = ?",
+          )
+          .bind(created, now, user.id, existing)
+      : this.#database
+          .prepare(
+            `INSERT INTO billing_customers(user_id, stripe_customer_id, created_at, updated_at)
+             VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`,
+          )
+          .bind(user.id, created, now, now);
+    await store.run();
     const stored = await this.#customerId(user.id);
     if (!stored) throw new BillingError(500, "billing_customer_failed", "The billing account could not be saved.");
     return stored;
@@ -358,12 +372,20 @@ export class BillingService {
         subscriptionAmount(subscription),
         subscription.status,
         subscriptionPeriodEnd(subscription),
-        subscription.cancel_at_period_end ? 1 : 0,
+        subscription.cancel_at_period_end || typeof subscription.cancel_at === "number" ? 1 : 0,
         this.#now(),
       )
       .run();
     if (serverId && this.#onSubscriptionSynced) {
-      await this.#onSubscriptionSynced({ subscriptionId, userId: ownerId, serverId, status: subscription.status });
+      await this.#onSubscriptionSynced({
+        subscriptionId,
+        userId: ownerId,
+        serverId,
+        status: subscription.status,
+        plan: key.plan,
+        interval: key.interval,
+        currency,
+      });
     }
   }
 
@@ -386,6 +408,12 @@ export class BillingService {
    * customer or an account to a second link.
    */
   async #subscriptionOwner(subscription: StripeSubscription, customerId: string): Promise<string | null> {
+    // A stored subscription keeps its account, also after the account gets a new customer.
+    const stored = await this.#database
+      .prepare("SELECT user_id FROM billing_subscriptions WHERE stripe_subscription_id = ?")
+      .bind(subscription.id)
+      .first<{ user_id: string }>();
+    if (stored) return stored.user_id;
     const known = await this.#database
       .prepare("SELECT user_id FROM billing_customers WHERE stripe_customer_id = ?")
       .bind(customerId)
@@ -493,6 +521,8 @@ function eventSubscriptionId(event: StripeEvent): string | null {
     case "customer.subscription.deleted":
     case "customer.subscription.paused":
     case "customer.subscription.resumed":
+    case "customer.subscription.pending_update_applied":
+    case "customer.subscription.pending_update_expired":
       return isString(object.id) ? object.id : null;
     case "invoice.paid":
     case "invoice.payment_failed": {
