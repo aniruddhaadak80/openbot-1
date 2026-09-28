@@ -99,8 +99,16 @@ export class BoatClient {
     return parseSandbox(await this.#request("GET", `/sandboxes/${encodeURIComponent(sandboxId)}`));
   }
 
-  async resumeSandbox(sandboxId: string): Promise<void> {
-    await this.#request("POST", `/sandboxes/${encodeURIComponent(sandboxId)}/resume`);
+  /**
+   * Resumes an archived sandbox. With a type, boat restores the disk on a machine of that size. boat
+   * refuses a smaller machine that cannot hold the data (`409 type_too_small`) and keeps the sandbox.
+   */
+  async resumeSandbox(sandboxId: string, type?: BoatSandboxType): Promise<void> {
+    await this.#request(
+      "POST",
+      `/sandboxes/${encodeURIComponent(sandboxId)}/resume`,
+      type === undefined ? {} : { body: { type } },
+    );
   }
 
   /**

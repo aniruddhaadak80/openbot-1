@@ -6,9 +6,12 @@ CREATE TABLE hosted_servers (
   name TEXT NOT NULL,
   provider TEXT NOT NULL DEFAULT 'boat' CHECK(provider IN ('boat')),
   provider_sandbox_id TEXT UNIQUE,
+  -- The machine of the sandbox.
   size TEXT NOT NULL CHECK(size IN ('small', 'default', 'large')),
-  -- The plan that the first Checkout sells. The Stripe subscription (billing_subscriptions) is the
-  -- truth after that: a change in the Customer Portal does not update these three columns.
+  -- The machine of a new plan, until boat resumes the sandbox on it. boat changes the size only on a resume.
+  pending_size TEXT CHECK(pending_size IS NULL OR pending_size IN ('small', 'default', 'large')),
+  -- The plan of the server. The Worker copies a change in the Customer Portal to these three columns,
+  -- but the Stripe subscription (billing_subscriptions) decides whether the server has a plan.
   plan TEXT NOT NULL CHECK(plan IN ('starter', 'standard', 'pro')),
   billing_interval TEXT NOT NULL CHECK(billing_interval IN ('month', 'year')),
   currency TEXT NOT NULL CHECK(currency IN ('eur', 'usd', 'pln')),

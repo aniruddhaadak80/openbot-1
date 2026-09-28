@@ -46,6 +46,11 @@ const TICK_BATCH_SIZE = 20;
  * closed long before, and it has no sandbox, so no data is lost.
  */
 const UNPAID_RETENTION_MS = 24 * 60 * 60_000;
+/**
+ * The cron sets up a paid server again this long after its setup failed. boat frees the idempotency
+ * key of a create that failed before the sandbox existed in about 2 minutes.
+ */
+const SETUP_RETRY_AFTER_MS = 10 * 60_000;
 /** The same list as `isOpenBillingStatus`: a subscription that Stripe can still charge. */
 const OPEN_STATUSES_SQL = "('active', 'trialing', 'past_due', 'unpaid', 'paused')";
 
@@ -80,6 +85,7 @@ interface HostedServerRow {
   name: string;
   provider_sandbox_id: string | null;
   size: HostedServerSize;
+  pending_size: HostedServerSize | null;
   plan: BillingPlanId;
   billing_interval: BillingInterval;
   currency: BillingCurrency;
@@ -93,7 +99,7 @@ interface HostedServerRow {
   updated_at: number;
 }
 
-const ROW_COLUMNS = `server_id, owner_user_id, name, provider_sandbox_id, size, plan, billing_interval, currency,
+const ROW_COLUMNS = `server_id, owner_user_id, name, provider_sandbox_id, size, pending_size, plan, billing_interval, currency,
   checkout_session_id, desired_state, observed_state, observed_error, provider_event_at, auth_session_id,
   created_at, updated_at`;
 
@@ -125,6 +131,7 @@ export interface HostedServerTickResult {
   provisioned: number;
   stopped: number;
   abandoned: number;
+  resized: number;
   failed: number;
 }
 
@@ -272,6 +279,7 @@ export class HostedServerService {
     }
     if (isOpenBillingStatus(sync.status)) await this.#followPlan(row, sync);
     await this.#applyPlan(await this.#requireRow(row.server_id));
+    await this.#resize(await this.#requireRow(row.server_id));
   }
 
   async delete(user: AuthUser, serverId: string, confirmName: unknown): Promise<void> {
@@ -310,7 +318,7 @@ export class HostedServerService {
         "The plan of this server ended. Renew it to start the server.",
       );
     }
-    await this.#wake(row, "message");
+    if (!(await this.#retrySetup(row))) await this.#wake(row, "message");
     return summary(await this.#requireRow(serverId));
   }
 
@@ -403,6 +411,7 @@ export class HostedServerService {
       provisioned: 0,
       stopped: 0,
       abandoned: 0,
+      resized: 0,
       failed: 0,
     };
     await this.#database
@@ -465,6 +474,17 @@ export class HostedServerService {
         .bind(now, now, now - UNPAID_RETENTION_MS)
         .run();
       result.abandoned = abandoned.meta.changes;
+      const failedSetups = await this.#database
+        .prepare(
+          `SELECT ${ROW_COLUMNS} FROM hosted_servers
+           WHERE desired_state = 'running' AND observed_state = 'error' AND provider_sandbox_id IS NULL
+             AND updated_at <= ? LIMIT ?`,
+        )
+        .bind(now - SETUP_RETRY_AFTER_MS, TICK_BATCH_SIZE)
+        .all<HostedServerRow>();
+      await run(failedSetups.results, async (row) => {
+        if (await this.#retrySetup(row)) result.provisioned += 1;
+      });
     }
     // A server whose plan ended and that still runs: the first stop did not happen.
     const unstopped = await this.#database
@@ -505,6 +525,16 @@ export class HostedServerService {
       );
       await this.#observe(row, state, now);
     });
+    // The Stripe webhook starts a resize at once. This catches a server that was busy then, or a failed stop.
+    const resizing = await this.#database
+      .prepare(
+        `SELECT ${ROW_COLUMNS} FROM hosted_servers
+         WHERE desired_state = 'running' AND observed_state = 'running' AND pending_size IS NOT NULL
+           AND provider_sandbox_id IS NOT NULL AND updated_at <= ? LIMIT ?`,
+      )
+      .bind(now - STUCK_AFTER_MS, TICK_BATCH_SIZE)
+      .all<HostedServerRow>();
+    result.resized = await run(resizing.results, (row) => this.#resize(row));
     const deleting = await this.#database
       .prepare(
         `SELECT ${ROW_COLUMNS} FROM hosted_servers
@@ -564,17 +594,44 @@ export class HostedServerService {
 
   /**
    * Stores a plan change from the Customer Portal, so the list and a renewal use the plan that the
-   * owner pays for. The size changes only for a server with no sandbox: the provider does not resize one.
+   * owner pays for. A server with a sandbox gets the new machine at its next resume (`pending_size`).
    */
   async #followPlan(row: HostedServerRow, sync: SubscriptionSync): Promise<void> {
     if (row.plan === sync.plan && row.billing_interval === sync.interval && row.currency === sync.currency) return;
+    const size = HOSTED_PLAN_SIZE[sync.plan];
     await this.#database
       .prepare(
         `UPDATE hosted_servers SET plan = ?, billing_interval = ?, currency = ?,
-           size = CASE WHEN provider_sandbox_id IS NULL THEN ? ELSE size END, updated_at = ?
+           size = CASE WHEN provider_sandbox_id IS NULL THEN ? ELSE size END,
+           pending_size = CASE WHEN provider_sandbox_id IS NULL OR size = ? THEN NULL ELSE ? END, updated_at = ?
          WHERE server_id = ? AND desired_state != 'deleted'`,
       )
-      .bind(sync.plan, sync.interval, sync.currency, HOSTED_PLAN_SIZE[sync.plan], this.#now(), row.server_id)
+      .bind(sync.plan, sync.interval, sync.currency, size, size, size, this.#now(), row.server_id)
+      .run();
+  }
+
+  /**
+   * Moves a running server to the machine of its new plan. boat changes the size only on a resume, so
+   * the server stops first: boat saves the disk, and the restart after the stop (`#observe`) resumes
+   * the sandbox on the new machine. The server is offline for this time.
+   */
+  async #resize(row: HostedServerRow): Promise<void> {
+    const boat = this.#boat;
+    if (!boat || !row.provider_sandbox_id || !row.pending_size) return;
+    if (row.desired_state !== "running" || row.observed_state !== "running") return;
+    try {
+      await boat.stopSandbox(row.provider_sandbox_id);
+    } catch (error) {
+      // 409: the sandbox cannot stop in its current state. The cron tries again.
+      if (error instanceof BoatApiError && error.status === 409) return;
+      throw error;
+    }
+    await this.#database
+      .prepare(
+        `UPDATE hosted_servers SET observed_state = 'stopping', updated_at = ?
+         WHERE server_id = ? AND desired_state = 'running' AND observed_state = 'running'`,
+      )
+      .bind(this.#now(), row.server_id)
       .run();
   }
 
@@ -650,6 +707,26 @@ export class HostedServerService {
         .bind(providerError(error), this.#now(), row.server_id)
         .run();
     }
+  }
+
+  /**
+   * Sets up a paid server again after its setup failed. It has no sandbox, so it has no data. The retry
+   * sends the same idempotency key with a new claim. When the failed call made a sandbox, boat refuses
+   * the new request body (`idempotency_key_reused`) for 24 hours, so no second sandbox is made then.
+   */
+  async #retrySetup(row: HostedServerRow): Promise<boolean> {
+    if (row.desired_state !== "running" || row.observed_state !== "error" || row.provider_sandbox_id) return false;
+    if (!(await getServerEntitlement(this.#database, row.server_id, this.#now()))) return false;
+    const reset = await this.#database
+      .prepare(
+        `UPDATE hosted_servers SET observed_state = 'awaiting_payment', observed_error = NULL, updated_at = ?
+         WHERE server_id = ? AND desired_state = 'running' AND observed_state = 'error' AND provider_sandbox_id IS NULL`,
+      )
+      .bind(this.#now(), row.server_id)
+      .run();
+    if (reset.meta.changes !== 1) return false;
+    await this.#provision(await this.#requireRow(row.server_id));
+    return true;
   }
 
   /**
@@ -781,9 +858,22 @@ export class HostedServerService {
   async #resume(row: HostedServerRow): Promise<void> {
     const boat = this.#boat;
     if (!boat || !row.provider_sandbox_id) return;
+    const size = row.pending_size;
     try {
-      await boat.resumeSandbox(row.provider_sandbox_id);
+      await boat.resumeSandbox(row.provider_sandbox_id, size ?? undefined);
     } catch (error) {
+      if (size && error instanceof BoatApiError && error.code === "type_too_small") {
+        // The data does not fit the smaller machine of the new plan. The server keeps its machine, and
+        // the Worker does not try again until the next plan change.
+        console.warn("Hosted server resize refused.", { serverId: row.server_id, error: safeErrorCode(error) });
+        await this.#database
+          .prepare(
+            "UPDATE hosted_servers SET pending_size = NULL, updated_at = ? WHERE server_id = ? AND pending_size = ?",
+          )
+          .bind(this.#now(), row.server_id, size)
+          .run();
+        return this.#resume({ ...row, pending_size: null });
+      }
       // 409: the provider already resumes or runs it; the webhook or the cron reports the result.
       if (error instanceof BoatApiError && error.status === 409) return;
       await this.#database
@@ -794,6 +884,14 @@ export class HostedServerService {
         .bind(providerError(error), this.#now(), row.server_id)
         .run();
       throw error;
+    }
+    if (size) {
+      await this.#database
+        .prepare(
+          "UPDATE hosted_servers SET size = ?, pending_size = NULL, updated_at = ? WHERE server_id = ? AND pending_size = ?",
+        )
+        .bind(size, this.#now(), row.server_id, size)
+        .run();
     }
   }
 
@@ -824,7 +922,7 @@ export class HostedServerService {
       .bind(observed, error, eventAt, this.#now(), row.server_id, eventAt)
       .run();
     if (updated.meta.changes !== 1 || observed !== "stopped") return;
-    // Only the provider stops a server, for example for maintenance. It must run, so it starts again.
+    // The provider stops a server, for example for maintenance, and a resize stops it. It must run, so it starts again.
     await this.#wake(await this.#requireRow(row.server_id), "restart");
   }
 

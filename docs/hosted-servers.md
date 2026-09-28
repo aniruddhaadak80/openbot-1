@@ -59,6 +59,10 @@ States: `awaiting_payment → creating → starting → running`; `running → s
    answers `host_unavailable`, at most once a minute for each host. The web client does this when a
    connection fails, then connects again every 5 seconds. A server whose plan ended answers
    `402 plan_required`.
+
+   A paid server whose setup failed has no sandbox. A wake (Retry in the add server dialog) sets
+   it up again at once, and the cron does this 10 minutes after each failure. Each attempt has a
+   new claim and the same idempotency key, the host ID.
 7. **Plan ends.** When the subscription is cancelled or unpaid, or `past_due` after its period
    end, the Worker sets `desired_state = 'stopped'` with the error `plan_ended` and stops the
    sandbox. boat saves the disk; the Worker never deletes it. "Renew plan" in Settings calls the
@@ -73,7 +77,12 @@ States: `awaiting_payment → creating → starting → running`; `running → s
    shows the end date and keeps the server running until then.
 8. **Plan change.** In the Customer Portal an upgrade is charged at once, and a downgrade or a
    shorter interval starts at the next period. The Worker copies the new plan, interval and currency
-   to the server. It changes the size only while the server has no sandbox.
+   to the server. boat changes the machine of a sandbox only on a resume (`type`), so the Worker
+   stops a running server (boat saves the disk) and resumes it on the machine of the new plan. The
+   server is offline for this time. The cron does this for a server that was not running at the
+   plan change. When the data does not fit a smaller machine, boat refuses it
+   (`409 type_too_small`); the server then starts on its old machine, and the Worker does not try
+   again until the next plan change.
 9. **Delete.** `DELETE /v2/hosting/servers/:id` with `{confirmName}`. The Worker first cancels the
    open plan now, with no refund. A Stripe failure stops the delete (502), so the user does not pay
    for a deleted server. Then it deletes the sandbox and its Remote host. The D1 row stays with `desired_state = 'deleted'`, so a sandbox is never
@@ -164,12 +173,13 @@ paid boat plan.
 These were not tested on boat. Test them before a user gets access:
 
 - that production Signal accepts tickets from the `test` Worker;
-- a lost response to the boat create call. The idempotency key is the host ID, so a retry returns
-  the same sandbox, but no retry runs by itself;
+- a lost response to the boat create call. The Worker sends the same request again one time, and
+  boat returns the same sandbox. When that also fails, the sandbox has a claim that the Worker
+  no longer accepts. For 24 hours, boat refuses each retry with `idempotency_key_reused`, which the
+  Worker logs. After that, a retry makes a new sandbox. An operator must delete the first one;
 - the vCPU, memory and disk of boat `large`;
-- a plan change of a server that has a sandbox. The plan changes, but the sandbox keeps its size,
-  and a downgrade does not make the disk smaller;
-- a provision error with an open plan. The Worker does not try again; the user can delete the
-  server, which cancels the plan;
+- a resize on boat: stop, then resume with a `type`. The docs say that it keeps the disk and costs
+  nothing more than the resume. The test uses a fake boat;
+- that boat frees the key of a refused create, so a retry of a setup that failed works;
 - whether boat stops a sandbox that runs for weeks. The Worker restarts it, but work in progress
   at that time stops.
