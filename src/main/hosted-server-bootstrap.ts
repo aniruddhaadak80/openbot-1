@@ -63,6 +63,9 @@ export async function applyHostedServerAccount({
   if (state.status === "signed_in") {
     user = state.user;
   } else {
+    // The account server did not answer. A stored session can still exist and the claim can be spent,
+    // so the claim waits for an answer. The start retry signs in again.
+    if (state.status === "error") throw new Error("The account server did not answer at the start.");
     if (!environment.claim) throw new Error("The hosted server is signed out and has no claim.");
     // The claim works one time. With no secret storage the session would end at the next start, and
     // the server could not sign in again. Keep the claim for a start that has a keyring.

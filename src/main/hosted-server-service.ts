@@ -84,9 +84,10 @@ export class HostedServerDesktopService {
     );
   }
 
-  wake(serverId: string): Promise<HostedServerSummary> {
+  /** Async, so a missing session rejects and does not throw into the transport error listener. */
+  async wake(serverId: string): Promise<HostedServerSummary> {
     this.#lastWakeAt.set(serverId, this.now());
-    return this.auth.requestAuthorized(
+    return await this.auth.requestAuthorized(
       `/v2/hosting/servers/${encodeURIComponent(serverId)}/wake`,
       { method: "POST" },
       decodeSummary,

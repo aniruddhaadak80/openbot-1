@@ -903,13 +903,18 @@ export async function createApplicationServices({
   }
   // At the same position. A failure leaves the host unconfigured and the app running, so the log
   // shows why; a throw here would make systemd restart the app with a claim that may be spent.
+  let hostedServerSignedIn = false;
+  const signInHostedServer = async (
+    environment: HostedServerEnvironment,
+    initialization: Promise<CentralAuthState>,
+  ): Promise<void> => {
+    await applyHostedServerAccount({ environment, centralAuth, centralAuthInitialization: initialization, teamStore });
+    hostedServerSignedIn = true;
+  };
   if (hostedServer) {
-    await applyHostedServerAccount({
-      environment: hostedServer,
-      centralAuth,
-      centralAuthInitialization,
-      teamStore,
-    }).catch((error) => logger.error("The hosted server could not sign in:", toLogValue(error)));
+    await signInHostedServer(hostedServer, centralAuthInitialization).catch((error) =>
+      logger.error("The hosted server could not sign in:", toLogValue(error)),
+    );
   }
   const teamChatStore = new TeamChatStore(store.database);
   const remoteDesktopRuntime = await resolveRemoteDesktopRuntime({
@@ -1272,7 +1277,13 @@ export async function createApplicationServices({
   if (hostedServer) {
     const hostedServerStartRetry = new HostedServerStartRetry({
       hostPhase: () => host.getStatus().phase,
-      startHost: () => host.start(),
+      startHost: async () => {
+        // A start with no answer from the account server ends in the auth error state, and only a
+        // retry reads the stored session again.
+        if (centralAuth.getState().status !== "signed_in") await centralAuth.retry();
+        if (!hostedServerSignedIn) await signInHostedServer(hostedServer, Promise.resolve(centralAuth.getState()));
+        return host.start();
+      },
       onError: (message, error) => logger.warn(message, toLogValue(error)),
     });
     hostedServerStartRetry.start();
