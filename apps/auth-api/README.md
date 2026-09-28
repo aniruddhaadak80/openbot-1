@@ -14,11 +14,13 @@ ticket key pair plus random admin, report and webhook secrets, all local to the
 checkout. Nothing in it is shared with production or with another machine, so a
 fork needs no key from anyone. Delete the file and rerun to get a fresh set.
 
-`.env.shared` holds encrypted development values that all maintainers share, now the Stripe
-sandbox keys. `bun run dev:api` decrypts it in memory. Ask a maintainer for
+`.env.shared` holds encrypted development values that all maintainers share: the Stripe
+sandbox keys and the development `BOAT_API_KEY`. The boat key creates real VMs, but only when the
+Worker runs with `HOSTED_SERVERS_ENABLED=true` and the account is in
+`HOSTED_SERVERS_ALLOWED_USER_IDS`. `bun run dev:api` decrypts it in memory. Ask a maintainer for
 `DOTENV_PRIVATE_KEY_SHARED`, then export it in your shell profile or add it to the root
 `.env.keys`. The shell profile works in every worktree. Without the key, the Worker runs with no
-Stripe keys. A value in `.env.dev` overrides the shared value. To change a value, run
+Stripe or boat keys. A value in `.env.dev` overrides the shared value. To change a value, run
 `bunx dotenvx set <NAME> <value> -f apps/auth-api/.env.shared -fk .env.keys`.
 
 ### Stripe sandbox
@@ -46,8 +48,10 @@ bunx dotenvx set STRIPE_WEBHOOK_SECRET <whsec_...> -f apps/auth-api/.env.shared 
 `scripts/stripe-flows-e2e.ts` checks the plan flows against the sandbox and a local Worker: renewal,
 failed renewal, cancel at the period end, plan change, renew, delete, another account's server, and a
 deleted customer. Each scenario uses a Stripe test clock and deletes it at the end. Start the Worker
-with `HOSTED_SERVERS_ENABLED=true` and `HOSTED_SERVERS_ALLOWED_USER_IDS` set to the output of
-`bun scripts/stripe-flows-e2e.ts --print-user-ids`, and forward the webhooks to it. Then, from the
+with `HOSTED_SERVERS_ENABLED=true`, `HOSTED_SERVERS_ALLOWED_USER_IDS` set to the output of
+`bun scripts/stripe-flows-e2e.ts --print-user-ids`, and `BOAT_API_KEY=e2e-invalid-key`, and forward
+the webhooks to it. A value in the shell overrides `.env.shared`; without the fake key, each paid
+scenario creates a real boat VM. Then, from the
 repository root:
 
 ```bash
