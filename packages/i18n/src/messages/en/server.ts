@@ -56,6 +56,8 @@ export const messages = defineMessages("server", {
   "server.add.custom.title": "Need a Mac or a custom setup?",
   "server.add.custom.description": "We can run OpenBot on a dedicated Mac mini, or make a plan for your company.",
   "server.add.custom.action": "Contact us",
+  "server.add.join.title": "Have an invite?",
+  "server.add.join.action": "Join a server",
   "server.hosted.progressTitle": "Setting up {name}",
   // The setup waits for the first payment on the Stripe page in the browser.
   "server.hosted.paymentTitle": "Finish the payment in your browser",
@@ -110,6 +112,7 @@ export const messages = defineMessages("server", {
   "server.rail.moved": "Moved server to position {position} of {total}.",
   "server.rail.label": "Servers",
   "server.rail.addRemote": "Add remote server",
+  "server.rail.add": "Add a server",
   "server.rail.buttonLabel": "{name} server",
   "server.rail.notificationsMuted": "notifications muted",
   "server.rail.actions": "Server actions",

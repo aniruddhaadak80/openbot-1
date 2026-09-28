@@ -379,6 +379,11 @@
   flex: 0 0 auto;
 }
 
+.add-server-join {
+  margin: 0;
+  text-align: center;
+}
+
 /* Progress */
 
 .add-server-progress {

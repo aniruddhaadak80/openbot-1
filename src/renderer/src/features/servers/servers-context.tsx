@@ -45,6 +45,8 @@ const Servers = createSimpleContext({
     const [hostStatus, setHostStatus] = createSignal<HostStatus>(FALLBACK_HOST_STATUS);
     const [joinServerOpen, setJoinServerOpen] = createSignal(false);
     const [addServerOpen, setAddServerOpen] = createSignal(false);
+    // True when the account can create hosted servers. The plus button then opens the plans.
+    const [hostedServersAvailable, setHostedServersAvailable] = createSignal(false);
     const [serverLoadRequest, setServerLoadRequest] = createSignal<{ serverId: string; nonce: number } | null>(null);
     let loadRequestNonce = 0;
     let pendingCompatibilityRetryServerId: string | null = null;
@@ -162,11 +164,24 @@ const Servers = createSimpleContext({
         .host.getStatus()
         .then(setHostStatus)
         .catch(() => undefined);
+      void refreshHostedServersAvailable();
       return () => {
         unsubscribeServers();
         unsubscribeHost();
       };
     });
+
+    /** Reads again whether the account can create hosted servers. The account can change after the start. */
+    async function refreshHostedServersAvailable(): Promise<boolean> {
+      const available = await serversPort()
+        .hostedServers.list()
+        .then(
+          (list) => list.available,
+          () => false,
+        );
+      setHostedServersAvailable(available);
+      return available;
+    }
 
     async function retryServerConnection(serverId: string): Promise<void> {
       pendingCompatibilityRetryServerId = serverId;
@@ -238,6 +253,8 @@ const Servers = createSimpleContext({
       setJoinServerOpen,
       addServerOpen,
       setAddServerOpen,
+      hostedServersAvailable,
+      refreshHostedServersAvailable,
       reorderServers,
       setServerMuted,
       setServerNotificationLevel,

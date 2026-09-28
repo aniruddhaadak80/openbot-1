@@ -172,7 +172,7 @@ function JoinServer(props: AccountProps) {
 
 /** A hosted server: the plans, the payment, then the setup. */
 function AddServer() {
-  const { servers, addServerOpen, setAddServerOpen } = useServers();
+  const { servers, addServerOpen, setAddServerOpen, setJoinServerOpen } = useServers();
   const { select } = useServerActions();
 
   return (
@@ -184,6 +184,11 @@ function AddServer() {
       onOpenServer={(serverId) => {
         setAddServerOpen(false);
         void select(serverId);
+      }}
+      onContactUs={() => void appPort().openExternal("hosted-server-contact")}
+      onJoinWithInvite={() => {
+        setAddServerOpen(false);
+        setJoinServerOpen(true);
       }}
     />
   );

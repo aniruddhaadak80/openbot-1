@@ -1,3 +1,4 @@
+import { HOSTED_SERVER_CONTACT_URL } from "@openbot/contracts/hosted-servers";
 import {
   type AccountUsage,
   type AddedAgent,
@@ -244,13 +245,20 @@ function WebWorkspaceFrame(props: WebWorkspaceProps) {
   const [joinOpen, setJoinOpen] = createSignal(false);
   const hostedServerCalls = createWebHostedServerCalls(props.accountFetch);
   const [addServer, setAddServer] = createSignal<{ resume: AddServerResume | null } | null>(null);
-  /** The plus button opens the add server dialog when the account can create hosted servers, else the join dialog. */
-  async function openAddServer(): Promise<void> {
+  // True when the account can create hosted servers. The plus button then opens the plans.
+  const [hostedServersAvailable, setHostedServersAvailable] = createSignal(false);
+  async function refreshHostedServersAvailable(): Promise<boolean> {
     const available = await hostedServerCalls.list().then(
       (list) => list.available,
       () => false,
     );
-    if (available) setAddServer({ resume: null });
+    setHostedServersAvailable(available);
+    return available;
+  }
+  void refreshHostedServersAvailable();
+  /** The plus button opens the add server dialog when the account can create hosted servers, else the join dialog. */
+  async function openAddServer(): Promise<void> {
+    if (await refreshHostedServersAvailable()) setAddServer({ resume: null });
     else setJoinOpen(true);
   }
   createEffect(
@@ -812,6 +820,7 @@ function WebWorkspaceFrame(props: WebWorkspaceProps) {
                   onSelect={selectServer}
                   onReorder={workspace.reorderHosts}
                   onAdd={() => void openAddServer()}
+                  addCreatesServer={hostedServersAvailable()}
                   onOpenSettings={(id, trigger) => void openServerSettings(id, trigger)}
                   onOpenUsage={(id, trigger) => void openUsage(id, trigger)}
                 />
@@ -841,6 +850,7 @@ function WebWorkspaceFrame(props: WebWorkspaceProps) {
                   onViewChange: layout.setServerView,
                   onSelect: selectServer,
                   onAdd: () => void openAddServer(),
+                  addCreatesServer: hostedServersAvailable(),
                   onOpenSettings: (id, trigger) => void openServerSettings(id, trigger),
                   onOpenUsage: (id, trigger) => void openUsage(id, trigger),
                 }}
@@ -954,6 +964,11 @@ function WebWorkspaceFrame(props: WebWorkspaceProps) {
                 onOpenServer={(serverId) => {
                   setAddServer(null);
                   selectServer(serverId);
+                }}
+                onContactUs={() => window.location.assign(HOSTED_SERVER_CONTACT_URL)}
+                onJoinWithInvite={() => {
+                  setAddServer(null);
+                  setJoinOpen(true);
                 }}
               />
               <JoinServerOverlay

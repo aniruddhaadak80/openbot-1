@@ -68,6 +68,8 @@ interface AddServerDialogProps {
    * it, the dialog does not show the "Contact us" footer.
    */
   onContactUs?: (() => void) | undefined;
+  /** Opens the invite dialog in place of this one. Without it, the dialog does not show the link. */
+  onJoinWithInvite?: (() => void) | undefined;
   /** The consumer names the server, so the user does not have to. The logo uses the ID as its seed, as the rail does. */
   onCreate: (input: CreateHostedServerInput) => Promise<CreatedHostedServer>;
   onRetry: () => void;
@@ -293,6 +295,17 @@ export function AddServerDialog(props: AddServerDialogProps) {
                       pendingPlan={pendingPlan()}
                       onChoose={(plan) => void create(plan)}
                     />
+
+                    <Show when={props.onJoinWithInvite}>
+                      {(onJoinWithInvite) => (
+                        <Text as="p" tone="muted" class="add-server-join">
+                          {t("server.add.join.title")}{" "}
+                          <Button variant="link" size="sm" disabled={creating()} onClick={() => onJoinWithInvite()()}>
+                            {t("server.add.join.action")}
+                          </Button>
+                        </Text>
+                      )}
+                    </Show>
 
                     <Show when={props.onContactUs}>
                       {(onContactUs) => (

@@ -59,6 +59,9 @@ export type HostedServerError = (typeof HOSTED_SERVER_ERRORS)[number];
 
 export const HOSTED_SERVER_NAME_MAX_LENGTH = 80;
 
+/** "Contact us" in the add server dialog, for a plan that the dialog does not have. */
+export const HOSTED_SERVER_CONTACT_URL = "mailto:hello@openbot.run";
+
 export interface HostedServerSummary {
   /** The same value as the Remote host id of the server. */
   serverId: string;

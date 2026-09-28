@@ -37,6 +37,7 @@ interface AddServerOverlayProps {
   onClose: () => void;
   onOpenServer: (serverId: string) => void;
   onContactUs?: (() => void) | undefined;
+  onJoinWithInvite?: (() => void) | undefined;
 }
 
 interface AddServerState {
@@ -184,6 +185,7 @@ function AddServerSession(props: AddServerOverlayProps) {
             resume={state.server ? { serverId: state.server.serverId, name: state.server.name } : undefined}
             onClose={props.onClose}
             onContactUs={props.onContactUs}
+            onJoinWithInvite={props.onJoinWithInvite}
             onCreate={create}
             onRetry={() => void retry()}
             onOpenServer={() => {

@@ -30,6 +30,7 @@ function AddServerFlow(props: FlowProps) {
   const [servers, setServers] = createSignal<ServerSummary[]>(STORY_SERVERS);
   const [addOpen, setAddOpen] = createSignal(props.startOpen ?? false);
   const [contactNote, setContactNote] = createSignal(false);
+  const [joinNote, setJoinNote] = createSignal(false);
   const [setupStatus, setSetupStatus] = createSignal<HostedServerSetupStatus | null>(null);
   const [pending, setPending] = createSignal({ id: "", name: "" });
   let attempts = 0;
@@ -79,6 +80,7 @@ function AddServerFlow(props: FlowProps) {
           ])
         }
         onAdd={openAdd}
+        addCreatesServer
       />
       <main class="foundation-story">
         <Heading as="h1" size="lg">
@@ -86,7 +88,10 @@ function AddServerFlow(props: FlowProps) {
         </Heading>
         <Text tone="muted">Click the plus button in the server rail to add a server.</Text>
         <Show when={contactNote()}>
-          <Text tone="muted">"Contact us" was clicked. The app opens its contact page here.</Text>
+          <Text tone="muted">"Contact us" was clicked. The app opens an email to hello@openbot.run here.</Text>
+        </Show>
+        <Show when={joinNote()}>
+          <Text tone="muted">"Join a server" was clicked. The app opens the invite dialog here.</Text>
         </Show>
       </main>
 
@@ -97,6 +102,10 @@ function AddServerFlow(props: FlowProps) {
           setupStatus={setupStatus()}
           onClose={() => setAddOpen(false)}
           onContactUs={() => setContactNote(true)}
+          onJoinWithInvite={() => {
+            setAddOpen(false);
+            setJoinNote(true);
+          }}
           onCreate={async () => {
             await new Promise((resolve) => window.setTimeout(resolve, 700));
             const count = servers().filter((server) => server.id.startsWith("hosted-")).length;

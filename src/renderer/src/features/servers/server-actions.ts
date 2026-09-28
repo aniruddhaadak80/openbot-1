@@ -2,7 +2,6 @@ import type { ServerSummary } from "@openbot/contracts/ipc";
 import { toast } from "@openbot/ui";
 import type { ServerActionCallbacks } from "@openbot/ui/features/servers/ServerActionItems";
 import { useText } from "@openbot/ui/text";
-import { appPort } from "../../app-port";
 import { usePlatform } from "../../platform";
 import { useUsage } from "../usage/usage-context";
 import { useServerSelection } from "./server-selection";
@@ -17,7 +16,15 @@ export function useServerActions() {
   const platform = usePlatform();
   const { t, errorMessage } = useText();
   const { openUsage } = useUsage();
-  const { servers, setServerMuted, setServerNotificationLevel, setJoinServerOpen, setAddServerOpen } = useServers();
+  const {
+    servers,
+    setServerMuted,
+    setServerNotificationLevel,
+    setJoinServerOpen,
+    setAddServerOpen,
+    hostedServersAvailable,
+    refreshHostedServersAvailable,
+  } = useServers();
   const { selectServer } = useServerSelection();
   const { openServerSettings } = useServerSettings();
 
@@ -40,13 +47,9 @@ export function useServerActions() {
   /** Opens the hosted server plans when the account can create a hosted server, otherwise the invite dialog. */
   function add(): void {
     if (platform.landingPreview) return;
-    void appPort()
-      .hostedServers.list()
-      .then(
-        (list) => list.available,
-        () => false,
-      )
-      .then((available) => (available ? setAddServerOpen(true) : setJoinServerOpen(true)));
+    void refreshHostedServersAvailable().then((available) =>
+      available ? setAddServerOpen(true) : setJoinServerOpen(true),
+    );
   }
 
   const callbacks: Required<ServerActionCallbacks> = {
@@ -56,5 +59,5 @@ export function useServerActions() {
     onOpenSettings: openServerSettings,
   };
 
-  return { orderedServers, select, add, callbacks };
+  return { orderedServers, select, add, addCreatesServer: hostedServersAvailable, callbacks };
 }

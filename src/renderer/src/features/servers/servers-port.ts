@@ -20,6 +20,7 @@ export interface ServersPort {
   >;
   browser: Pick<OpenBotDesktopApi["browser"], "setVisible">;
   hostAdmin: Pick<OpenBotDesktopApi["hostAdmin"], "updateIdentity">;
+  hostedServers: Pick<OpenBotDesktopApi["hostedServers"], "list">;
   host: Pick<
     OpenBotDesktopApi["host"],
     "configure" | "getStatus" | "onEvent" | "recheckScreenRecording" | "start" | "stop" | "updateIdentity"
