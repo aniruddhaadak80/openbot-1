@@ -446,17 +446,16 @@ async function connectWeb(account: Account, serverId: string, name: string, scre
     });
     const start = Date.now();
     await page.goto(`${account.api}/app`);
-    try {
-      // The rail names the button "{name} server", followed by its status labels.
-      const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-      const label = new RegExp(`^${escaped} server(,|$)`, "u");
-      await page.getByRole("button", { name: label }).waitFor({ timeout: 180_000 });
-    } catch (error) {
+    const fail = async (error: unknown) => {
       await page.screenshot({ path: join(ROOT, ".openbot-build", `failed-${screenshot}`), fullPage: true });
       const snapshot = await page.locator("body").ariaSnapshot();
       process.stdout.write(`page: ${page.url()}\n${snapshot}\nconsole:\n${consoleLines.join("\n")}\n`);
       throw error;
-    }
+    };
+    // The rail names the button "{name} server", followed by its status labels.
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+    const label = new RegExp(`^${escaped} server(,|$)`, "u");
+    await page.getByRole("button", { name: label }).waitFor({ timeout: 180_000 }).catch(fail);
     const peers = await waitFor(
       "peer connected",
       async () => {
@@ -464,7 +463,7 @@ async function connectWeb(account: Account, serverId: string, name: string, scre
         return list.some((peer) => peer.state === "connected") ? list : null;
       },
       120_000,
-    );
+    ).catch(fail);
     const connectedAt = Date.now();
     await page.screenshot({ path: join(ROOT, ".openbot-build", screenshot) });
     const reported = await waitFor(
