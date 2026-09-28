@@ -39,7 +39,7 @@ when a server is idle or boat stops a sandbox; and `error` and `deleted`. The Wo
    `POST /v2/hosting/servers/:id/checkout` makes a new page for "Open the payment page again".
 2. **Provision.** The signed Stripe webhook syncs the subscription to D1 and calls
    `onSubscriptionSynced`. When the plan is open and the row waits for payment, the Worker makes
-   the host ID claim (single use, 1 hour; it stores only the hash) and creates the sandbox from
+   the host ID claim (1 hour; it stores only the hash) and creates the sandbox from
    `HOSTED_SERVER_TEMPLATE` with `noEnv: true`, so no operator secret or repository goes into the
    sandbox. The sandbox env holds only `OPENBOT_HOSTED_HOST_ID` and `OPENBOT_HOSTED_CLAIM`. The cron
    provisions a paid row when the webhook call failed, and deletes an unpaid row after 24 hours
@@ -225,8 +225,13 @@ under `xvfb-run` with `--password-store=gnome-libsecret`. The keyring files are 
   them through the slow mount for 25 s. boat keeps changes in `/srv` (not in `/var/lib`), and `/srv`
   is on the disk before the service starts.
 
-OpenBot redeems the claim only when `safeStorage` works. The claim works one time, so a session
-that is only in memory would leave the server signed out after its next start.
+OpenBot redeems the claim only when `safeStorage` works. After the first redeem the claim works
+for 10 more minutes, so a server whose response was lost can redeem it again; each redeem revokes the
+session of the one before. After that, a session that is only in memory would leave the server
+signed out after its next start. A new setup of the server makes a new claim.
+
+A start that cannot reach the account server does not use the claim. The start retry signs in
+again with backoff (30 s to 10 min) and then publishes the host.
 
 ## Tested on boat
 

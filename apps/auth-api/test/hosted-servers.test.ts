@@ -261,7 +261,14 @@ describe("hosted servers", () => {
     await expect(
       new D1AuthRepository(sqliteD1(context.database)).authenticate(redeemed.sessionToken, context.clock.now),
     ).resolves.toMatchObject({ id: "owner" });
+    // A server whose response was lost redeems again. The new session replaces the first one.
+    const retried = await context.service.redeemClaim(claim);
+    const auth = new D1AuthRepository(sqliteD1(context.database));
+    await expect(auth.authenticate(retried.sessionToken, context.clock.now)).resolves.toMatchObject({ id: "owner" });
+    await expect(auth.authenticate(redeemed.sessionToken, context.clock.now)).resolves.toBeNull();
+    context.clock.now += 11 * MINUTE;
     await expect(context.service.redeemClaim(claim)).rejects.toMatchObject({ code: "hosted_claim_invalid" });
+    await expect(auth.authenticate(retried.sessionToken, context.clock.now)).resolves.toMatchObject({ id: "owner" });
 
     // The claim lifetime counts from the payment, not from the create request.
     const second = await context.service.create(owner, { ...STARTER, plan: "pro" }, "create-key-0000002", RETURN);

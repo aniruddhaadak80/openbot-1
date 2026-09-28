@@ -734,7 +734,7 @@ export class CentralAuthManager extends EventEmitter<CentralAuthEvents> {
   }
 
   /**
-   * Signs a new hosted server in with the single-use claim that the account server put in its VM.
+   * Signs a new hosted server in with the claim that the account server put in its VM.
    * The result names the host ID that the account server reserved for this account.
    */
   async redeemHostedServerClaim(claim: string): Promise<{ hostId: string; name: string; user: CentralAuthUser }> {

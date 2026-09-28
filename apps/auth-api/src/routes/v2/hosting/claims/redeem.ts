@@ -8,7 +8,7 @@ import {
   requestSourceIp,
 } from "../../../../server/request-auth";
 
-/** A new hosted server exchanges its single-use claim for the owner's account session. */
+/** A new hosted server exchanges its claim for the owner's account session. */
 export const Route = createFileRoute("/v2/hosting/claims/redeem")({
   server: {
     handlers: {

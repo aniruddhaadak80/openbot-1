@@ -36,6 +36,11 @@ import { PERSISTENT_SESSION_EXPIRES_AT } from "./session-policy";
 import type { AuthUser, WorkerBindings } from "./types";
 
 const CLAIM_TTL_MS = 60 * 60_000;
+/**
+ * After the first redeem the claim works for this long, so a server whose response was lost can
+ * redeem it again. Each redeem revokes the session of the one before it.
+ */
+const CLAIM_REDEEM_RETRY_MS = 10 * 60_000;
 /** The cron asks the provider about a server that has been in a transition state this long. */
 const STUCK_AFTER_MS = 2 * 60_000;
 /** boat retries a delivery for hours, so a delivery ID is kept longer than the 5 minute replay window. */
@@ -404,37 +409,37 @@ export class HostedServerService {
     const now = this.#now();
     const row = await this.#database
       .prepare(
-        `SELECT server_id, name, owner_user_id FROM hosted_servers
-         WHERE claim_token_hash = ? AND claim_redeemed_at IS NULL AND claim_expires_at > ? AND desired_state != 'deleted'`,
+        `SELECT server_id, name, owner_user_id, auth_session_id FROM hosted_servers
+         WHERE claim_token_hash = ? AND claim_expires_at > ? AND desired_state != 'deleted'`,
       )
       .bind(claimHash, now)
-      .first<{ server_id: string; name: string; owner_user_id: string }>();
+      .first<{ server_id: string; name: string; owner_user_id: string; auth_session_id: string | null }>();
     if (!row) throw invalidClaim();
     const sessionId = crypto.randomUUID();
     const sessionToken = randomToken();
     const [redeemed] = await this.#database.batch([
+      // The first redeem shortens the claim lifetime to the retry window. A later one does not extend it.
       this.#database
         .prepare(
-          `UPDATE hosted_servers SET claim_token_hash = NULL, claim_redeemed_at = ?, auth_session_id = ?, updated_at = ?
-           WHERE server_id = ? AND claim_token_hash = ? AND claim_redeemed_at IS NULL`,
+          `UPDATE hosted_servers SET claim_redeemed_at = COALESCE(claim_redeemed_at, ?),
+             claim_expires_at = MIN(claim_expires_at, ?), auth_session_id = ?, updated_at = ?
+           WHERE server_id = ? AND claim_token_hash = ? AND claim_expires_at > ? AND auth_session_id IS ?`,
         )
-        .bind(now, sessionId, now, row.server_id, claimHash),
+        .bind(now, now + CLAIM_REDEEM_RETRY_MS, sessionId, now, row.server_id, claimHash, now, row.auth_session_id),
       this.#database
         .prepare(
           `INSERT INTO auth_sessions(id, user_id, token_hash, expires_at, created_at, last_used_at)
            SELECT ?, owner_user_id, ?, ?, ?, ? FROM hosted_servers
-           WHERE server_id = ? AND auth_session_id = ? AND claim_redeemed_at = ?`,
+           WHERE server_id = ? AND auth_session_id = ?`,
         )
-        .bind(
-          sessionId,
-          await sha256(sessionToken),
-          PERSISTENT_SESSION_EXPIRES_AT,
-          now,
-          now,
-          row.server_id,
-          sessionId,
-          now,
-        ),
+        .bind(sessionId, await sha256(sessionToken), PERSISTENT_SESSION_EXPIRES_AT, now, now, row.server_id, sessionId),
+      // The session of an earlier redeem, or of an earlier VM of this server.
+      this.#database
+        .prepare(
+          `UPDATE auth_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL
+             AND EXISTS(SELECT 1 FROM hosted_servers WHERE server_id = ? AND auth_session_id = ?)`,
+        )
+        .bind(now, row.auth_session_id, row.server_id, sessionId),
     ]);
     if (redeemed?.meta.changes !== 1) throw invalidClaim();
     const user = await this.#database
@@ -762,7 +767,7 @@ export class HostedServerService {
     const claimed = await this.#database
       .prepare(
         `UPDATE hosted_servers SET observed_state = 'creating', last_wake_reason = 'create', claim_token_hash = ?,
-           claim_expires_at = ?, checkout_session_id = NULL, provider_event_at = ?, last_active_at = ?,
+           claim_expires_at = ?, claim_redeemed_at = NULL, checkout_session_id = NULL, provider_event_at = ?, last_active_at = ?,
            lease_until = ?, updated_at = ?
          WHERE server_id = ? AND observed_state = 'awaiting_payment' AND desired_state = 'running'`,
       )
@@ -772,7 +777,7 @@ export class HostedServerService {
     const request = {
       type: row.size,
       from: template,
-      // The claim is the only secret that the VM gets. It is single use and expires.
+      // The claim is the only secret that the VM gets. It works for a short time after its first use, and expires.
       env: { OPENBOT_HOSTED_CLAIM: claim, OPENBOT_HOSTED_HOST_ID: row.server_id },
       ttlSeconds: LEASE_TTL_SECONDS,
       idempotencyKey: row.server_id,
