@@ -735,6 +735,10 @@ export class HostService extends EventEmitter<HostEvents> {
     return this.#api.getPresence();
   }
 
+  connectedClientCount(): number {
+    return this.#api.connectedClientCount();
+  }
+
   setTyping(input: SetTeamTypingInput): void {
     this.#api.setLocalTyping(input.agentId, input.typing);
   }

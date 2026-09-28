@@ -179,13 +179,14 @@ the avatar without an account session.
 Hosted servers are available only to development accounts at this time. A hosted server is an
 OpenBot computer that runs in a [boat](https://boat.dev) sandbox in the EU (Germany, Finland or
 France). The sandbox holds the server's workspaces, conversations, attachments, browser data and
-team data, the same as your own computer would. The server runs all the time. When boat stops the
-sandbox, boat keeps a snapshot of its disk until the server starts again. Deleting the server
+team data, the same as your own computer would. The server stops after 15 minutes with no use and
+starts again when you connect. When boat stops the sandbox, boat keeps a snapshot of its disk until
+the server starts again. Deleting the server
 deletes the sandbox.
 
 For each hosted server, the account service stores the owner, name, size, desired and reported
 state, a reason code when the server fails to start, the reason for its last start, the boat
-sandbox ID, a hash of the one-time setup claim, and creation, update and deletion times. After a
+sandbox ID, a hash of the one-time setup claim, the time of its last use, and creation, update and deletion times. After a
 server is deleted, its record stays so that the service never loses track of a sandbox. It also
 stores the ID and receive time of each boat webhook delivery for 7 days. The account service does
 not receive the server's conversations, files or commands, and its boat key cannot read them.

@@ -10,6 +10,7 @@ import { isDynamicRecord, isString } from "@openbot/contracts/runtime-values";
 import { exportJWK, generateKeyPair } from "jose";
 import { afterEach, describe, expect, it } from "vitest";
 import { BillingService } from "../src/server/billing-service";
+import { sha256 } from "../src/server/crypto";
 import { D1AuthRepository } from "../src/server/d1-auth-repository";
 import { HostedServerService } from "../src/server/hosted-server-service";
 import { RemoteControlPlane } from "../src/server/remote-control-plane";
@@ -24,6 +25,8 @@ const ORIGIN = "https://openbot.test";
 const RETURN = { target: "desktop", origin: ORIGIN } as const;
 const STARTER = { name: "Cloud one", plan: "starter", interval: "month", currency: "eur" } as const;
 const MINUTE = 60_000;
+/** boat stops a sandbox by itself this many seconds after its start. */
+const LEASE = 7_200;
 const databases: DatabaseSync[] = [];
 
 afterEach(() => {
@@ -237,6 +240,7 @@ describe("hosted servers", () => {
       type: "small",
       from: "openbot-server-test",
       env: { OPENBOT_HOSTED_HOST_ID: server.serverId },
+      ttlSeconds: LEASE,
     });
     expect(context.state(server.serverId)).toMatchObject({ observed_state: "starting", checkout_session_id: null });
     // A paid page cannot open again.
@@ -450,7 +454,7 @@ describe("hosted servers", () => {
     expect(context.state(server.serverId)).toMatchObject({ desired_state: "running", observed_state: "stopping" });
     context.clock.now += MINUTE;
     await context.service.handleWebhook(context.boatWebhook("sandbox.archived", "archived"));
-    expect(calls("resume").map((call) => call.body)).toEqual([{ type: "large" }]);
+    expect(calls("resume").map((call) => call.body)).toEqual([{ ttlSeconds: LEASE, type: "large" }]);
     expect(context.state(server.serverId)).toMatchObject({
       observed_state: "waking",
       size: "large",
@@ -465,7 +469,11 @@ describe("hosted servers", () => {
     expect(calls("stop")).toHaveLength(2);
     context.clock.now += MINUTE;
     await context.service.handleWebhook(context.boatWebhook("sandbox.archived", "archived"));
-    expect(calls("resume").map((call) => call.body)).toEqual([{ type: "large" }, { type: "small" }, null]);
+    expect(calls("resume").map((call) => call.body)).toEqual([
+      { ttlSeconds: LEASE, type: "large" },
+      { ttlSeconds: LEASE, type: "small" },
+      { ttlSeconds: LEASE },
+    ]);
     expect(context.state(server.serverId)).toMatchObject({
       observed_state: "waking",
       size: "large",
@@ -571,6 +579,54 @@ describe("hosted servers", () => {
     await expect(context.service.wake(member, server.serverId)).resolves.toMatchObject({ state: "waking" });
     expect(resumes()).toBe(2);
     expect(context.state(server.serverId)).toMatchObject({ last_wake_reason: "message" });
+  });
+
+  it("stops a server with no use for 15 minutes, keeps it, and starts it on the next use", async () => {
+    const context = await setup();
+    const server = await createRunningServer(context);
+    const { sessionToken } = await context.service.redeemClaim(context.claims[0]);
+    const ownerToken = "owner-session-token-0001";
+    context.database
+      .prepare(
+        `INSERT INTO auth_sessions(id, user_id, token_hash, expires_at, created_at, last_used_at)
+         VALUES ('owner-session', 'owner', ?, ?, 1, 1)`,
+      )
+      .run(await sha256(ownerToken), context.clock.now + 60 * MINUTE);
+    const calls = (path: string) => context.boatCalls.filter((call) => call.path === path);
+
+    // Only the session of the server can keep it running.
+    await expect(context.service.reportActivity(ownerToken, server.serverId)).rejects.toMatchObject({ status: 404 });
+    context.clock.now += 14 * MINUTE;
+    await context.service.reportActivity(sessionToken, server.serverId);
+    context.clock.now += 14 * MINUTE;
+    await context.service.tick(context.clock.now);
+    expect(context.state(server.serverId)).toMatchObject({ desired_state: "running", observed_state: "running" });
+    expect(calls("/sandboxes/bx_1")).toHaveLength(0);
+
+    // Use near the end of the boat lease moves the lease.
+    context.clock.now += 33 * MINUTE;
+    await context.service.reportActivity(sessionToken, server.serverId);
+    expect(calls("/sandboxes/bx_1").map((call) => [call.method, call.body])).toEqual([
+      ["PATCH", { ttlSeconds: LEASE }],
+    ]);
+    await context.service.reportActivity(sessionToken, server.serverId);
+    expect(calls("/sandboxes/bx_1")).toHaveLength(1);
+
+    context.clock.now += 15 * MINUTE;
+    await context.service.tick(context.clock.now);
+    expect(context.state(server.serverId)).toMatchObject({ desired_state: "idle", observed_state: "stopping" });
+    expect(calls("/sandboxes/bx_1/stop")).toHaveLength(1);
+    context.clock.now += MINUTE;
+    await context.service.handleWebhook(context.boatWebhook("sandbox.archived", "archived"));
+    await context.service.reportActivity(sessionToken, server.serverId);
+    await context.service.tick(context.clock.now + 5 * MINUTE);
+    expect(context.state(server.serverId)).toMatchObject({ desired_state: "idle", observed_state: "stopped" });
+    expect(calls("/sandboxes/bx_1/resume")).toHaveLength(0);
+    expect(context.boatCalls.some((call) => call.method === "DELETE")).toBe(false);
+
+    await expect(context.service.wake(owner, server.serverId)).resolves.toMatchObject({ state: "waking" });
+    expect(calls("/sandboxes/bx_1/resume").map((call) => call.body)).toEqual([{ ttlSeconds: LEASE }]);
+    expect(context.state(server.serverId)).toMatchObject({ desired_state: "running", last_wake_reason: "message" });
   });
 });
 

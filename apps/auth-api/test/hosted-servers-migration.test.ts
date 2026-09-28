@@ -44,6 +44,8 @@ describe("hosted servers migration", () => {
     insertServer(database, { id: "server-1", plan: "pro", size: "large", state: "awaiting_payment" });
     expect(() => insertServer(database, { id: "server-2", plan: "free", size: "small", state: "stopped" })).toThrow();
     expect(() => database.exec("UPDATE hosted_servers SET pending_size = 'huge'")).toThrow();
+    database.exec("UPDATE hosted_servers SET desired_state = 'idle', last_active_at = 2, lease_until = 3");
+    expect(() => database.exec("UPDATE hosted_servers SET desired_state = 'asleep'")).toThrow();
     // A paid sandbox never loses its row: the owner cannot be removed while the row exists.
     expect(() => database.exec("DELETE FROM users WHERE id = 'user-1'")).toThrow();
     expect(database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);

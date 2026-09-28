@@ -100,6 +100,7 @@ import { Route as V1SkillsSkillIdVersionsVersionIdRouteImport } from './routes/v
 import { Route as V1SkillsAdminFeaturedSkillIdRouteImport } from './routes/v1/skills/admin/featured/$skillId'
 import { Route as V1SkillsAdminSubmissionsVersionIdRouteImport } from './routes/v1/skills/admin/submissions/$versionId'
 import { Route as V2HostingServersServerIdIndexRouteImport } from './routes/v2/hosting/servers/$serverId/index'
+import { Route as V2HostingServersServerIdActivityRouteImport } from './routes/v2/hosting/servers/$serverId/activity'
 import { Route as V2HostingServersServerIdCheckoutRouteImport } from './routes/v2/hosting/servers/$serverId/checkout'
 import { Route as V2HostingServersServerIdWakeRouteImport } from './routes/v2/hosting/servers/$serverId/wake'
 import { Route as V2RemoteHostsHostIdInvitesRouteImport } from './routes/v2/remote/hosts/$hostId/invites'
@@ -586,6 +587,12 @@ const V2HostingServersServerIdIndexRoute =
     path: '/v2/hosting/servers/$serverId/',
     getParentRoute: () => rootRouteImport,
   } as any)
+const V2HostingServersServerIdActivityRoute =
+  V2HostingServersServerIdActivityRouteImport.update({
+    id: '/v2/hosting/servers/$serverId/activity',
+    path: '/v2/hosting/servers/$serverId/activity',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const V2HostingServersServerIdCheckoutRoute =
   V2HostingServersServerIdCheckoutRouteImport.update({
     id: '/v2/hosting/servers/$serverId/checkout',
@@ -749,6 +756,7 @@ export interface FileRoutesByFullPath {
   '/v1/skills/$skillId/versions/$versionId': typeof V1SkillsSkillIdVersionsVersionIdRouteWithChildren
   '/v1/skills/admin/featured/$skillId': typeof V1SkillsAdminFeaturedSkillIdRoute
   '/v1/skills/admin/submissions/$versionId': typeof V1SkillsAdminSubmissionsVersionIdRoute
+  '/v2/hosting/servers/$serverId/activity': typeof V2HostingServersServerIdActivityRoute
   '/v2/hosting/servers/$serverId/checkout': typeof V2HostingServersServerIdCheckoutRoute
   '/v2/hosting/servers/$serverId/wake': typeof V2HostingServersServerIdWakeRoute
   '/v2/remote/hosts/$hostId/invites': typeof V2RemoteHostsHostIdInvitesRoute
@@ -854,6 +862,7 @@ export interface FileRoutesByTo {
   '/v1/skills/$skillId/versions/$versionId': typeof V1SkillsSkillIdVersionsVersionIdRouteWithChildren
   '/v1/skills/admin/featured/$skillId': typeof V1SkillsAdminFeaturedSkillIdRoute
   '/v1/skills/admin/submissions/$versionId': typeof V1SkillsAdminSubmissionsVersionIdRoute
+  '/v2/hosting/servers/$serverId/activity': typeof V2HostingServersServerIdActivityRoute
   '/v2/hosting/servers/$serverId/checkout': typeof V2HostingServersServerIdCheckoutRoute
   '/v2/hosting/servers/$serverId/wake': typeof V2HostingServersServerIdWakeRoute
   '/v2/remote/hosts/$hostId/invites': typeof V2RemoteHostsHostIdInvitesRoute
@@ -960,6 +969,7 @@ export interface FileRoutesById {
   '/v1/skills/$skillId/versions/$versionId': typeof V1SkillsSkillIdVersionsVersionIdRouteWithChildren
   '/v1/skills/admin/featured/$skillId': typeof V1SkillsAdminFeaturedSkillIdRoute
   '/v1/skills/admin/submissions/$versionId': typeof V1SkillsAdminSubmissionsVersionIdRoute
+  '/v2/hosting/servers/$serverId/activity': typeof V2HostingServersServerIdActivityRoute
   '/v2/hosting/servers/$serverId/checkout': typeof V2HostingServersServerIdCheckoutRoute
   '/v2/hosting/servers/$serverId/wake': typeof V2HostingServersServerIdWakeRoute
   '/v2/remote/hosts/$hostId/invites': typeof V2RemoteHostsHostIdInvitesRoute
@@ -1067,6 +1077,7 @@ export interface FileRouteTypes {
     | '/v1/skills/$skillId/versions/$versionId'
     | '/v1/skills/admin/featured/$skillId'
     | '/v1/skills/admin/submissions/$versionId'
+    | '/v2/hosting/servers/$serverId/activity'
     | '/v2/hosting/servers/$serverId/checkout'
     | '/v2/hosting/servers/$serverId/wake'
     | '/v2/remote/hosts/$hostId/invites'
@@ -1172,6 +1183,7 @@ export interface FileRouteTypes {
     | '/v1/skills/$skillId/versions/$versionId'
     | '/v1/skills/admin/featured/$skillId'
     | '/v1/skills/admin/submissions/$versionId'
+    | '/v2/hosting/servers/$serverId/activity'
     | '/v2/hosting/servers/$serverId/checkout'
     | '/v2/hosting/servers/$serverId/wake'
     | '/v2/remote/hosts/$hostId/invites'
@@ -1277,6 +1289,7 @@ export interface FileRouteTypes {
     | '/v1/skills/$skillId/versions/$versionId'
     | '/v1/skills/admin/featured/$skillId'
     | '/v1/skills/admin/submissions/$versionId'
+    | '/v2/hosting/servers/$serverId/activity'
     | '/v2/hosting/servers/$serverId/checkout'
     | '/v2/hosting/servers/$serverId/wake'
     | '/v2/remote/hosts/$hostId/invites'
@@ -1369,6 +1382,7 @@ export interface RootRouteChildren {
   V1SitesUploadsUploadIdActivateRoute: typeof V1SitesUploadsUploadIdActivateRoute
   V1SitesUploadsUploadIdFileRoute: typeof V1SitesUploadsUploadIdFileRoute
   V1SkillsAdminFeaturedSkillIdRoute: typeof V1SkillsAdminFeaturedSkillIdRoute
+  V2HostingServersServerIdActivityRoute: typeof V2HostingServersServerIdActivityRoute
   V2HostingServersServerIdCheckoutRoute: typeof V2HostingServersServerIdCheckoutRoute
   V2HostingServersServerIdWakeRoute: typeof V2HostingServersServerIdWakeRoute
   V2RemoteHostsHostIdInvitesRoute: typeof V2RemoteHostsHostIdInvitesRoute
@@ -2021,6 +2035,13 @@ declare module '@tanstack/solid-router' {
       preLoaderRoute: typeof V2HostingServersServerIdIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/v2/hosting/servers/$serverId/activity': {
+      id: '/v2/hosting/servers/$serverId/activity'
+      path: '/v2/hosting/servers/$serverId/activity'
+      fullPath: '/v2/hosting/servers/$serverId/activity'
+      preLoaderRoute: typeof V2HostingServersServerIdActivityRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/v2/hosting/servers/$serverId/checkout': {
       id: '/v2/hosting/servers/$serverId/checkout'
       path: '/v2/hosting/servers/$serverId/checkout'
@@ -2313,6 +2334,7 @@ const rootRouteChildren: RootRouteChildren = {
   V1SitesUploadsUploadIdActivateRoute: V1SitesUploadsUploadIdActivateRoute,
   V1SitesUploadsUploadIdFileRoute: V1SitesUploadsUploadIdFileRoute,
   V1SkillsAdminFeaturedSkillIdRoute: V1SkillsAdminFeaturedSkillIdRoute,
+  V2HostingServersServerIdActivityRoute: V2HostingServersServerIdActivityRoute,
   V2HostingServersServerIdCheckoutRoute: V2HostingServersServerIdCheckoutRoute,
   V2HostingServersServerIdWakeRoute: V2HostingServersServerIdWakeRoute,
   V2RemoteHostsHostIdInvitesRoute: V2RemoteHostsHostIdInvitesRoute,
@@ -2332,13 +2354,10 @@ export const routeTree = rootRouteImport
   ._addFileTypes<FileRouteTypes>()
 
 import type { getRouter } from './router.tsx'
-
 import type { createStart } from '@tanstack/solid-start'
-
 declare module '@tanstack/solid-start' {
   interface Register {
     ssr: true
-
     router: Awaited<ReturnType<typeof getRouter>>
   }
 }

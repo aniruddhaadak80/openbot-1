@@ -51,6 +51,14 @@ const UNPAID_RETENTION_MS = 24 * 60 * 60_000;
  * key of a create that failed before the sandbox existed in about 2 minutes.
  */
 const SETUP_RETRY_AFTER_MS = 10 * 60_000;
+/** A server that reports no activity this long stops. The next use starts it again. */
+const IDLE_STOP_AFTER_MS = 15 * 60_000;
+/**
+ * boat stops a sandbox this long after its create or resume, so a server that the Worker loses stops.
+ * A boat trial refuses more than 2 hours. Activity extends the time when less than an hour is left.
+ */
+const LEASE_TTL_SECONDS = 2 * 60 * 60;
+const LEASE_EXTEND_BEFORE_MS = 60 * 60_000;
 /** The same list as `isOpenBillingStatus`: a subscription that Stripe can still charge. */
 const OPEN_STATUSES_SQL = "('active', 'trialing', 'past_due', 'unpaid', 'paused')";
 
@@ -75,8 +83,11 @@ export class HostedServerServiceError extends Error {
   }
 }
 
-/** A server runs all the time. It never stops for being idle. It stops (and keeps its data) when its plan ends. */
-type DesiredState = "running" | "stopped" | "deleted";
+/**
+ * A server stops and keeps its data when it has no use for 15 minutes (`idle`) or when its plan ends
+ * (`stopped`). An idle server starts again on the next use; a stopped one only on renewal.
+ */
+type DesiredState = "running" | "idle" | "stopped" | "deleted";
 type WakeReason = "create" | "message" | "restart";
 
 interface HostedServerRow {
@@ -95,13 +106,15 @@ interface HostedServerRow {
   observed_error: HostedServerError | null;
   provider_event_at: number | null;
   auth_session_id: string | null;
+  last_active_at: number | null;
+  lease_until: number | null;
   created_at: number;
   updated_at: number;
 }
 
 const ROW_COLUMNS = `server_id, owner_user_id, name, provider_sandbox_id, size, pending_size, plan, billing_interval, currency,
   checkout_session_id, desired_state, observed_state, observed_error, provider_event_at, auth_session_id,
-  created_at, updated_at`;
+  last_active_at, lease_until, created_at, updated_at`;
 
 /** The billing calls that hosted servers use. */
 export type HostedServerBilling = Pick<
@@ -132,6 +145,7 @@ export interface HostedServerTickResult {
   stopped: number;
   abandoned: number;
   resized: number;
+  idle: number;
   failed: number;
 }
 
@@ -318,8 +332,47 @@ export class HostedServerService {
         "The plan of this server ended. Renew it to start the server.",
       );
     }
+    if (row.desired_state === "idle") {
+      const now = this.#now();
+      // The start counts as use, so the server does not stop again before its first client connects.
+      await this.#database
+        .prepare(
+          `UPDATE hosted_servers SET desired_state = 'running', last_active_at = ?, updated_at = ?
+           WHERE server_id = ? AND desired_state = 'idle'`,
+        )
+        .bind(now, now, row.server_id)
+        .run();
+      // A server that still stops starts again when the provider reports that it stopped.
+      await this.#wake(await this.#requireRow(serverId), "message");
+      return summary(await this.#requireRow(serverId));
+    }
     if (!(await this.#retrySetup(row))) await this.#wake(row, "message");
     return summary(await this.#requireRow(serverId));
+  }
+
+  /**
+   * The server reports that it is in use: a client is connected or an agent works. Only the session
+   * that the server got from its claim can report for it.
+   */
+  async reportActivity(sessionToken: string, serverId: string): Promise<void> {
+    const now = this.#now();
+    const row = await this.#database
+      .prepare(
+        `SELECT ${ROW_COLUMNS} FROM hosted_servers
+         WHERE server_id = ? AND desired_state != 'deleted' AND auth_session_id = (
+           SELECT id FROM auth_sessions WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > ?
+         )`,
+      )
+      .bind(serverId, await sha256(sessionToken), now)
+      .first<HostedServerRow>();
+    if (!row) throw notFound();
+    // An idle server already stops. Its next start comes from a client.
+    if (row.desired_state !== "running") return;
+    await this.#database
+      .prepare("UPDATE hosted_servers SET last_active_at = ? WHERE server_id = ? AND desired_state = 'running'")
+      .bind(now, row.server_id)
+      .run();
+    await this.#extendLease(row, now);
   }
 
   async redeemClaim(claim: unknown): Promise<HostedServerClaim> {
@@ -412,6 +465,7 @@ export class HostedServerService {
       stopped: 0,
       abandoned: 0,
       resized: 0,
+      idle: 0,
       failed: 0,
     };
     await this.#database
@@ -486,11 +540,22 @@ export class HostedServerService {
         if (await this.#retrySetup(row)) result.provisioned += 1;
       });
     }
-    // A server whose plan ended and that still runs: the first stop did not happen.
+    // A running server with no use for 15 minutes stops. A state change also counts as use, so a new or
+    // resized server has time for its first client.
+    const unused = await this.#database
+      .prepare(
+        `SELECT ${ROW_COLUMNS} FROM hosted_servers
+         WHERE desired_state = 'running' AND observed_state = 'running' AND provider_sandbox_id IS NOT NULL
+           AND COALESCE(last_active_at, 0) <= ? AND updated_at <= ? LIMIT ?`,
+      )
+      .bind(now - IDLE_STOP_AFTER_MS, now - IDLE_STOP_AFTER_MS, TICK_BATCH_SIZE)
+      .all<HostedServerRow>();
+    result.idle = await run(unused.results, (row) => this.#stopIdle(row, now));
+    // A server that must stop and still runs: the first stop did not happen.
     const unstopped = await this.#database
       .prepare(
         `SELECT ${ROW_COLUMNS} FROM hosted_servers
-         WHERE desired_state = 'stopped' AND provider_sandbox_id IS NOT NULL
+         WHERE desired_state IN ('idle', 'stopped') AND provider_sandbox_id IS NOT NULL
            AND observed_state IN ('starting', 'running', 'waking') AND updated_at <= ? LIMIT ?`,
       )
       .bind(now - STUCK_AFTER_MS, TICK_BATCH_SIZE)
@@ -650,7 +715,10 @@ export class HostedServerService {
       }
       return null;
     }
-    if (row.desired_state === "running" && row.observed_state !== "awaiting_payment") {
+    if (
+      (row.desired_state === "running" || row.desired_state === "idle") &&
+      row.observed_state !== "awaiting_payment"
+    ) {
       await this.#endPlan(row);
       return "stopped";
     }
@@ -671,10 +739,11 @@ export class HostedServerService {
     const claimed = await this.#database
       .prepare(
         `UPDATE hosted_servers SET observed_state = 'creating', last_wake_reason = 'create', claim_token_hash = ?,
-           claim_expires_at = ?, checkout_session_id = NULL, provider_event_at = ?, updated_at = ?
+           claim_expires_at = ?, checkout_session_id = NULL, provider_event_at = ?, last_active_at = ?,
+           lease_until = ?, updated_at = ?
          WHERE server_id = ? AND observed_state = 'awaiting_payment' AND desired_state = 'running'`,
       )
-      .bind(await sha256(claim), now + CLAIM_TTL_MS, now, now, row.server_id)
+      .bind(await sha256(claim), now + CLAIM_TTL_MS, now, now, now + LEASE_TTL_SECONDS * 1000, now, row.server_id)
       .run();
     if (claimed.meta.changes !== 1) return;
     const request = {
@@ -682,6 +751,7 @@ export class HostedServerService {
       from: template,
       // The claim is the only secret that the VM gets. It is single use and expires.
       env: { OPENBOT_HOSTED_CLAIM: claim, OPENBOT_HOSTED_HOST_ID: row.server_id },
+      ttlSeconds: LEASE_TTL_SECONDS,
       idempotencyKey: row.server_id,
     };
     try {
@@ -765,7 +835,7 @@ export class HostedServerService {
       .prepare(
         `UPDATE hosted_servers SET desired_state = 'stopped', observed_error = 'plan_ended', claim_token_hash = NULL,
            updated_at = ?
-         WHERE server_id = ? AND desired_state = 'running'`,
+         WHERE server_id = ? AND desired_state IN ('running', 'idle')`,
       )
       .bind(this.#now(), row.server_id)
       .run();
@@ -794,9 +864,34 @@ export class HostedServerService {
     await this.#database
       .prepare(
         `UPDATE hosted_servers SET observed_state = 'stopping', updated_at = ?
-         WHERE server_id = ? AND desired_state = 'stopped' AND observed_state = ?`,
+         WHERE server_id = ? AND desired_state IN ('idle', 'stopped') AND observed_state = ?`,
       )
       .bind(this.#now(), row.server_id, row.observed_state)
+      .run();
+  }
+
+  /** Stops a server with no use. Activity that comes in first keeps it running. */
+  async #stopIdle(row: HostedServerRow, now: number): Promise<void> {
+    const idle = await this.#database
+      .prepare(
+        `UPDATE hosted_servers SET desired_state = 'idle', updated_at = ?
+         WHERE server_id = ? AND desired_state = 'running' AND observed_state = 'running'
+           AND COALESCE(last_active_at, 0) <= ?`,
+      )
+      .bind(this.#now(), row.server_id, now - IDLE_STOP_AFTER_MS)
+      .run();
+    if (idle.meta.changes === 1) await this.#stop({ ...row, desired_state: "idle" });
+  }
+
+  /** Moves the boat stop time of a server in use, so boat does not stop it. */
+  async #extendLease(row: HostedServerRow, now: number): Promise<void> {
+    const boat = this.#boat;
+    if (!boat || !row.provider_sandbox_id || row.observed_state !== "running") return;
+    if (row.lease_until !== null && row.lease_until - now > LEASE_EXTEND_BEFORE_MS) return;
+    await boat.extendSandbox(row.provider_sandbox_id, LEASE_TTL_SECONDS);
+    await this.#database
+      .prepare("UPDATE hosted_servers SET lease_until = ? WHERE server_id = ?")
+      .bind(now + LEASE_TTL_SECONDS * 1000, row.server_id)
       .run();
   }
 
@@ -847,10 +942,10 @@ export class HostedServerService {
     const waking = await this.#database
       .prepare(
         `UPDATE hosted_servers SET observed_state = 'waking', observed_error = NULL,
-           last_wake_reason = ?, provider_event_at = ?, updated_at = ?
+           last_wake_reason = ?, provider_event_at = ?, last_active_at = ?, lease_until = ?, updated_at = ?
          WHERE server_id = ? AND observed_state = ? AND desired_state = 'running'`,
       )
-      .bind(reason, now, now, row.server_id, row.observed_state)
+      .bind(reason, now, now, now + LEASE_TTL_SECONDS * 1000, now, row.server_id, row.observed_state)
       .run();
     if (waking.meta.changes === 1) await this.#resume(row);
   }
@@ -860,7 +955,7 @@ export class HostedServerService {
     if (!boat || !row.provider_sandbox_id) return;
     const size = row.pending_size;
     try {
-      await boat.resumeSandbox(row.provider_sandbox_id, size ?? undefined);
+      await boat.resumeSandbox(row.provider_sandbox_id, LEASE_TTL_SECONDS, size ?? undefined);
     } catch (error) {
       if (size && error instanceof BoatApiError && error.code === "type_too_small") {
         // The data does not fit the smaller machine of the new plan. The server keeps its machine, and
@@ -922,7 +1017,8 @@ export class HostedServerService {
       .bind(observed, error, eventAt, this.#now(), row.server_id, eventAt)
       .run();
     if (updated.meta.changes !== 1 || observed !== "stopped") return;
-    // The provider stops a server, for example for maintenance, and a resize stops it. It must run, so it starts again.
+    // The provider stops a server, for example for maintenance or at the end of its lease, and a resize
+    // stops it. A server in use must run, so it starts again. An idle server stays stopped (`#wake`).
     await this.#wake(await this.#requireRow(row.server_id), "restart");
   }
 

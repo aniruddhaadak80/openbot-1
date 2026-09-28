@@ -331,6 +331,11 @@ export class TeamApiServer {
     };
   }
 
+  /** Remote clients with an open event stream. Each WebRTC client opens one after it signs in. */
+  connectedClientCount(): number {
+    return this.#eventClients.size;
+  }
+
   setLocalTyping(agentId: string | null, typing: boolean): void {
     const next = typing && this.#server ? agentId : null;
     if (next === this.#localTypingAgentId) return;

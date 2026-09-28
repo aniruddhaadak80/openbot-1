@@ -68,8 +68,7 @@ server. It needs the real `BOAT_API_KEY`, a template from `bun run hosting:templ
 `--auth-api-url` reaches your Worker (for example a `cloudflared tunnel --url` to its port), and
 `HOSTED_SERVER_TEMPLATE` set to that template. Start the Worker with
 `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=.trycloudflare.com`, or Vite refuses the tunnel host. A boat
-trial account refuses a server that has no auto-stop, so the create fails with `provider_billing`
-until the account has a paid boat plan.
+trial account allows only `small` and `default`, so use a Starter or Standard plan there.
 
 `bun run api:deploy:test` reads `.env.shared` before `.env.production`. The first file wins, so the
 test Worker gets the sandbox keys, never live keys.

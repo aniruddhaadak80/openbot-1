@@ -1570,8 +1570,10 @@ unclear OAuth account selection, CAPTCHA, passkeys, and payment confirmation use
 A hosted server is one [boat](https://boat.dev) sandbox for one account. It runs the Linux
 OpenBot build under Xvfb and is a normal Remote host after its first start. The account Worker
 owns the sandbox lifecycle: it creates, resumes and deletes sandboxes, and D1 keeps the desired
-and observed state. A server runs all the time: it never asks to stop. When boat stops a sandbox,
-the Worker resumes it, and clients ask the Worker to start it when a connection fails. No message
+and observed state. A server reports each minute while it is in use, and the Worker stops it after
+15 minutes with no report. boat also stops each sandbox at the end of a 2-hour lease that activity
+extends. When boat stops a server in use, the Worker resumes it, and clients ask the Worker to
+start a stopped server when a connection fails. No message
 waits in the Worker while a server is stopped; the client keeps it and connects again. The Worker's boat key cannot read files or run commands in a
 sandbox. See [hosted servers](hosted-servers.md) for the flow, the configuration and the template.
 

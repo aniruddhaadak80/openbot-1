@@ -1,6 +1,6 @@
 /**
  * A hosted server has nobody to press Retry, so it publishes the host again after a failed start.
- * The server runs all the time: nothing here stops it.
+ * Nothing here stops the server. The Worker stops it when it reports no use (`HostedServerActivity`).
  */
 
 import type { HostPhase } from "@openbot/contracts/ipc";

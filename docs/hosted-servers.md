@@ -2,8 +2,8 @@
 
 A hosted server is an OpenBot server that runs in a [boat](https://boat.dev) sandbox, so it works
 when the user's computer is off. Each server is one boat sandbox for one account. The sandbox runs
-the Linux build of OpenBot under Xvfb. The server runs all the time (24/7). It does not stop when
-it is idle. When boat stops a sandbox, the Worker starts it again.
+the Linux build of OpenBot under Xvfb. The server runs while it is in use. After 15 minutes with no
+use, the Worker stops it and keeps its data, and the next client starts it again.
 
 Hosted servers are a development feature. Only the `test` Worker environment enables them, and
 only for the account IDs in `HOSTED_SERVERS_ALLOWED_USER_IDS`, and only when the Worker has
@@ -18,13 +18,14 @@ only for the account IDs in `HOSTED_SERVERS_ALLOWED_USER_IDS`, and only when the
 | Server template | `scripts/hosting/` | Builds the boat named snapshot that each server starts from. |
 | Server bootstrap | `src/main/hosted-server-bootstrap.ts` | On the first start, redeems the claim, signs in, and publishes the host. |
 | Start retry | `src/main/hosted-server-start-retry.ts` | Publishes the host again after a failed start. |
+| Activity report | `src/main/hosted-server-activity.ts` | Tells the Worker each minute that the server is in use. |
 | Billing link | `apps/auth-api/src/server/hosted-billing.ts`, `billing-service.ts` | Opens Stripe Checkout for a new server. Tells the hosting service when a subscription changes. |
 | Desktop and web clients | `AddServerOverlay`, `SettingsHostedServersTab`, `hosted-server-service.ts`, `web-hosted-servers.ts`, `web-hosted-server-wake.ts` | Pick a plan, pay, list, start, renew and delete. Start a stopped server when a connection fails. |
 
 ## Lifecycle
 
-States: `awaiting_payment → creating → starting → running`; `running → stopping → stopped → waking → running` when boat stops a sandbox; and `error` and
-`deleted`. The Worker stores what it wants (`desired_state`) and what boat reports
+States: `awaiting_payment → creating → starting → running`; `running → stopping → stopped → waking → running`
+when a server is idle or boat stops a sandbox; and `error` and `deleted`. The Worker stores what it wants (`desired_state`) and what boat reports
 (`observed_state`). boat webhooks and the cron update `observed_state`.
 
 1. **Create.** The rail plus button opens the add server dialog when the account can create hosted
@@ -49,10 +50,24 @@ States: `awaiting_payment → creating → starting → running`; `running → s
 4. **First boot.** OpenBot starts with `OPENBOT_HOSTED_SERVER=1`. It redeems the claim at
    `POST /v2/hosting/claims/redeem`, signs in as the owner, keeps the host ID, and publishes the
    host. `registerHost` refuses the host ID for any other account.
-5. **Always on.** The server never asks to stop. `desired_state` is `running` while the plan is
-   open. When boat reports `archived` (for example, after maintenance), the webhook
-   resumes the sandbox at once. The Worker cron (each minute on `test`) resumes a server that stays
-   `stopped` for 2 minutes.
+5. **In use.** Each minute while a remote client is connected (an open Team API event stream), a
+   remote desktop or browser view is open, a file moves, or an agent works, OpenBot sends
+   `POST /v2/hosting/servers/:id/activity` with the session from its claim. The Worker accepts only
+   that session, not the owner's own sessions, and stores `last_active_at`. When boat reports
+   `archived` for a server in use (for example, after maintenance), the webhook resumes the sandbox
+   at once. The Worker cron (each minute on `test`) resumes a server that stays `stopped` for 2
+   minutes.
+
+   **Idle.** The cron stops a running server with no activity and no state change for 15 minutes:
+   `desired_state = 'idle'`, and boat saves the disk. The webhook and the cron do not resume an
+   idle server. The next wake (step 6) sets it to `running` and resumes it. A start and a resume
+   count as activity, so the first client has 15 minutes to connect. A scheduled automation does
+   not start an idle server: it runs when a client starts the server again.
+
+   **Lease.** boat has no idle timer, and a boat trial refuses a sandbox with no auto-stop. Each
+   create and resume sends `ttlSeconds: 7200`, so boat stops a sandbox that the Worker loses. An
+   activity report extends the time (`PATCH /sandboxes/:id`) when less than 1 hour is left
+   (`lease_until`). When boat stops a server in use at the end of its lease, the Worker resumes it.
 6. **Start after a failure.** A client that cannot reach the host calls
    `POST /v2/hosting/servers/:id/wake` (owner or member; 404 for a host that is not a hosted
    server). This resumes a `stopped` sandbox or one in `error`. The desktop does this when Signal
@@ -185,9 +200,11 @@ ID (2 vCPU/4 GB, then 4 vCPU/8 GB, then 2 vCPU/4 GB). Files in `/srv` and in the
 and an enabled systemd unit started again after each resume. The stop took 25 to 31 s, and the
 sandbox was `idle` 3 to 6 s after the resume call.
 
-A boat trial account refuses a sandbox with no auto-stop (`trial_auto_stop_required`), and the
-Worker shows it as `provider_billing`. The test ran with a local two-hour TTL; the Worker needs a
-paid boat plan.
+A boat trial account refuses a sandbox with no auto-stop, or a TTL longer than 2 hours
+(`trial_auto_stop_required`), and the Worker shows it as `provider_billing`. The Worker sends a
+2-hour lease, so it works on a trial. A probe on 2026-09-28 confirmed that
+`PATCH /sandboxes/:id {ttlSeconds}` sets `archiveAfter` to the current time plus the TTL. A trial
+allows only `small` and `default`, so a Pro server (`large`) needs a paid boat plan.
 
 ## Not confirmed
 

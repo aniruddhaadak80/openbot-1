@@ -17,8 +17,9 @@ CREATE TABLE hosted_servers (
   currency TEXT NOT NULL CHECK(currency IN ('eur', 'usd', 'pln')),
   -- The newest Checkout Session of a server that waits for its first payment.
   checkout_session_id TEXT,
+  -- 'idle': no use for 15 minutes. The sandbox is archived and kept, and it starts again on the next use.
   -- 'stopped': the plan ended. The sandbox is archived and kept, and it starts again on renewal.
-  desired_state TEXT NOT NULL CHECK(desired_state IN ('running', 'stopped', 'deleted')),
+  desired_state TEXT NOT NULL CHECK(desired_state IN ('running', 'idle', 'stopped', 'deleted')),
   observed_state TEXT NOT NULL CHECK(
     observed_state IN (
       'awaiting_payment', 'creating', 'starting', 'running', 'stopping', 'stopped', 'waking', 'error', 'deleted'
@@ -35,6 +36,10 @@ CREATE TABLE hosted_servers (
   claim_expires_at INTEGER,
   claim_redeemed_at INTEGER,
   auth_session_id TEXT,
+  -- The last activity report of the server, or its last start.
+  last_active_at INTEGER,
+  -- When boat stops the sandbox by itself. Each create and resume sets it, and activity extends it.
+  lease_until INTEGER,
   idempotency_key TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,

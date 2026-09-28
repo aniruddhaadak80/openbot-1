@@ -79,6 +79,7 @@ export class BoatClient {
     type: BoatSandboxType;
     from: string;
     env: Record<string, string>;
+    ttlSeconds: number;
     idempotencyKey: string;
   }): Promise<BoatSandbox> {
     const body = await this.#request("POST", "/sandboxes", {
@@ -87,7 +88,7 @@ export class BoatClient {
         from: input.from,
         env: input.env,
         noEnv: true,
-        ttlSeconds: null,
+        ttlSeconds: input.ttlSeconds,
         setupScript: HOSTED_SERVER_SETUP_SCRIPT,
       },
       headers: { "Idempotency-Key": input.idempotencyKey },
@@ -102,13 +103,17 @@ export class BoatClient {
   /**
    * Resumes an archived sandbox. With a type, boat restores the disk on a machine of that size. boat
    * refuses a smaller machine that cannot hold the data (`409 type_too_small`) and keeps the sandbox.
+   * boat stops the sandbox again `ttlSeconds` after the resume.
    */
-  async resumeSandbox(sandboxId: string, type?: BoatSandboxType): Promise<void> {
-    await this.#request(
-      "POST",
-      `/sandboxes/${encodeURIComponent(sandboxId)}/resume`,
-      type === undefined ? {} : { body: { type } },
-    );
+  async resumeSandbox(sandboxId: string, ttlSeconds: number, type?: BoatSandboxType): Promise<void> {
+    await this.#request("POST", `/sandboxes/${encodeURIComponent(sandboxId)}/resume`, {
+      body: type === undefined ? { ttlSeconds } : { ttlSeconds, type },
+    });
+  }
+
+  /** boat stops the sandbox `ttlSeconds` from now, in place of its earlier stop time. */
+  async extendSandbox(sandboxId: string, ttlSeconds: number): Promise<void> {
+    await this.#request("PATCH", `/sandboxes/${encodeURIComponent(sandboxId)}`, { body: { ttlSeconds } });
   }
 
   /**

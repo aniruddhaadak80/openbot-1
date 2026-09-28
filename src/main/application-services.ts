@@ -91,6 +91,7 @@ import { performDynamicIslandCriticalAction } from "./dynamic-island-actions";
 import { DynamicIslandWindowController } from "./dynamic-island-window";
 import { HostService } from "./host-service";
 import { HostUpdateCoordinator } from "./host-update-coordinator";
+import { HostedServerActivity } from "./hosted-server-activity";
 import { applyHostedServerAccount, type HostedServerEnvironment } from "./hosted-server-bootstrap";
 import { HostedServerDesktopService } from "./hosted-server-service";
 import { HostedServerStartRetry } from "./hosted-server-start-retry";
@@ -192,6 +193,7 @@ const TEARDOWN_ORDER = {
   updater: 10,
   hostUpdateCoordinator: 12,
   hostedServerStartRetry: 13,
+  hostedServerActivity: 14,
   computerUseHighlight: 18,
   computerUsePermissionHelp: 19,
   dynamicIsland: 20,
@@ -1248,6 +1250,19 @@ export async function createApplicationServices({
     hostedServerStartRetry.start();
     teardown.push(TEARDOWN_ORDER.hostedServerStartRetry, "the hosted server start retry", () =>
       hostedServerStartRetry.stop(),
+    );
+    const hostedServerActivity = new HostedServerActivity({
+      hostId: hostedServer.hostId,
+      inUse: () =>
+        host.connectedClientCount() > 0 ||
+        host.describeRestartBlockers().length > 0 ||
+        service.hasActiveWork().length > 0,
+      report: async (path) => centralAuth.requestAuthorized(path, { method: "POST" }, () => undefined),
+      onError: (message, error) => logger.warn(message, toLogValue(error)),
+    });
+    hostedServerActivity.start();
+    teardown.push(TEARDOWN_ORDER.hostedServerActivity, "the hosted server activity report", () =>
+      hostedServerActivity.stop(),
     );
   }
   await hostUpdateCoordinator.tick();
