@@ -18,6 +18,7 @@ import {
   shouldAutoStartHost,
 } from "./development-profile";
 import { hostAllowsTenantLaunch } from "./host-update-coordinator";
+import { takeHostedServerEnvironment } from "./hosted-server-bootstrap";
 import { accountIpcHandlers } from "./ipc/account-handlers";
 import { agentAdminIpcHandlers } from "./ipc/agent-admin-handlers";
 import { agentIpcHandlers } from "./ipc/agent-handlers";
@@ -35,6 +36,7 @@ import { customProviderIpcHandlers } from "./ipc/custom-provider-handlers";
 import { registerIpcGroups } from "./ipc/define-ipc-group";
 import { dynamicIslandIpcHandlers } from "./ipc/dynamic-island-handlers";
 import { hostAdminIpcHandlers } from "./ipc/host-admin-handlers";
+import { hostedServerIpcHandlers } from "./ipc/hosted-server-handlers";
 import { hostedSiteIpcHandlers } from "./ipc/hosted-site-handlers";
 import { marketplaceAgentIpcHandlers } from "./ipc/marketplace-agent-handlers";
 import { mcpServerIpcHandlers } from "./ipc/mcp-server-handlers";
@@ -92,6 +94,8 @@ const developmentRemoteRole =
     ? process.env.OPENBOT_DEV_REMOTE_ROLE
     : null;
 const developmentTestClientEnabled = !app.isPackaged && process.env.OPENBOT_DEV_TEST_CLIENT_ENABLED === "1";
+// Before any child process starts: this removes the single-use claim from the environment they inherit.
+const hostedServer = takeHostedServerEnvironment(process.env, app.isPackaged, process.platform);
 const developmentInviteLinkOptions = {
   allowLocalDevelopmentApiUrl: developmentRemoteRole !== null,
 };
@@ -354,6 +358,7 @@ function registerIpcHandlers({
   skills,
   hostedSites,
   billing,
+  hostedServers,
   customProviderChanges,
   customAgentChanges,
   providerDetection,
@@ -404,6 +409,7 @@ function registerIpcHandlers({
     ...skillIpcHandlers({ skills, getMainWindow, translate: language.translate }),
     ...hostedSiteIpcHandlers({ hostedSites, getMainWindow, translate: language.translate }),
     ...billingIpcHandlers({ billing }),
+    ...hostedServerIpcHandlers({ hostedServers }),
     ...customProviderIpcHandlers(customProviderChanges),
     ...customAgentIpcHandlers(customAgentChanges),
     ...providerDetectionIpcHandlers({ detection: providerDetection, settings: providerDetectionSettings }),
@@ -704,6 +710,7 @@ if (!hasSingleInstanceLock) {
         appVariant,
         developmentRemoteRole,
         developmentTestClientEnabled,
+        hostedServer,
         macHapticFeedback,
         teardown,
         forwardCentralAuth,

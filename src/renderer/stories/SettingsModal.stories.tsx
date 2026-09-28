@@ -127,6 +127,8 @@ function SettingsModalStory(props: {
   hiddenDetected?: readonly string[];
   /** Where the scan looks. Without it the tab has no detection settings. */
   detectionSettings?: ProviderDetectionSettingsValue;
+  /** Adds the Hosted servers tab with one stopped server. */
+  hostedServers?: boolean;
   initialTab?: SettingsTab;
 }) {
   const previousApi = window.openbot;
@@ -279,6 +281,7 @@ function SettingsModalStory(props: {
           detectedProviderApi={detection?.api}
           detectionSettings={detectionSettings()}
           onDetectionSettingsChange={setDetectionSettings}
+          hostedServersApi={props.hostedServers ? mock.api.hostedServers : undefined}
         />
       </main>
       <Toaster />
@@ -452,6 +455,11 @@ export const ProviderUpdateRetry: Story = {
 /** No plan yet. Choose a plan: the mock then shows it as active, as after a Stripe payment. */
 export const Billing: Story = {
   render: () => <SettingsModalStory initialOpen initialTab="billing" />,
+};
+
+/** An account that can create hosted servers. Create, wake and delete change the mock list. */
+export const HostedServers: Story = {
+  render: () => <SettingsModalStory initialOpen hostedServers initialTab="hosted-servers" />,
 };
 
 export const Interactive: Story = {

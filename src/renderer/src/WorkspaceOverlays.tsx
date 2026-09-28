@@ -398,6 +398,7 @@ function AppSettings(props: AccountProps) {
         codeLogin={providerDownloads() ? codeLogin : undefined}
         hostedSitesApi={appPort().hostedSites}
         billingApi={appPort().billing}
+        hostedServersApi={appPort().hostedServers}
         turboModePending={turboModePending()}
         onTestNotification={sendTestNotification}
         onOpenNotificationSettings={openNotificationSettings}

@@ -72,6 +72,7 @@ function setup() {
     },
     hostLogo: vi.fn().mockResolvedValue(new Response("logo", { headers: { "Content-Type": "image/png" } })),
     billing: () => billing,
+    hosting: () => ({ list: vi.fn(), create: vi.fn(), delete: vi.fn(), wake: vi.fn() }),
     inviteEmailDelivery: () => ({ send: vi.fn().mockResolvedValue(undefined) }),
     signalUrl: () => "wss://signal.example.test",
     sourceIp: () => "127.0.0.1",

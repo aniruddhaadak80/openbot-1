@@ -1,6 +1,6 @@
 import { createHmac } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
-import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import { DatabaseSync } from "node:sqlite";
 import { exportJWK, generateKeyPair, importJWK, jwtVerify } from "jose";
 import { describe, expect, it, vi } from "vitest";
 import { AuthService } from "../src/server/auth-service";
@@ -13,6 +13,7 @@ import {
   RemoteTicketSigner,
   verifyRemoteServiceSignature,
 } from "../src/server/remote-control-plane";
+import { sqliteD1 } from "./sqlite-d1";
 
 describe("remote control plane migration", () => {
   it("keeps each tunnel owner and does not import other members", () => {
@@ -497,6 +498,7 @@ describe("RemoteControlPlane", () => {
     database.exec(readFileSync(new URL("../migrations/0017_mobile_session_security.sql", import.meta.url), "utf8"));
     database.exec(readFileSync(new URL("../migrations/0018_remote_device_sessions.sql", import.meta.url), "utf8"));
     database.exec(readFileSync(new URL("../migrations/0020_permanent_invites.sql", import.meta.url), "utf8"));
+    database.exec(readFileSync(new URL("../migrations/0023_hosted_servers.sql", import.meta.url), "utf8"));
     const pair = await generateKeyPair("ES256", { extractable: true });
     const privateJwk = await exportJWK(pair.privateKey);
     const publicJwk = { ...(await exportJWK(pair.publicKey)), kid: "test-key", use: "sig", alg: "ES256" };
@@ -998,63 +1000,3 @@ describe("permanent invitation links", () => {
     }
   });
 });
-
-function sqliteD1(database: DatabaseSync): D1Database {
-  class Statement {
-    readonly sql: string;
-    readonly values: SQLInputValue[];
-
-    constructor(sql: string, values: SQLInputValue[] = []) {
-      this.sql = sql;
-      this.values = values;
-    }
-
-    bind(...values: SQLInputValue[]) {
-      return new Statement(this.sql, values);
-    }
-
-    async first<Value>() {
-      // biome-ignore lint/nursery/noUnsafeTypeAssertion: The test adapter must implement D1's generic result contract.
-      return (database.prepare(this.sql).get(...this.values) as Value | undefined) ?? null;
-    }
-
-    async all<Value>() {
-      // biome-ignore lint/nursery/noUnsafeTypeAssertion: The test adapter must implement D1's generic result contract.
-      return { success: true, results: database.prepare(this.sql).all(...this.values) as Value[] };
-    }
-
-    async run() {
-      // D1 counts the rows that triggers change too, like SQLite total_changes().
-      const before = totalChanges();
-      database.prepare(this.sql).run(...this.values);
-      return { success: true, meta: { changes: totalChanges() - before }, results: [] };
-    }
-  }
-
-  function totalChanges() {
-    return Number(database.prepare("SELECT total_changes() AS changes").get()?.changes);
-  }
-
-  let batchChain = Promise.resolve();
-  const adapter = {
-    prepare: (sql: string) => new Statement(sql),
-    batch: (statements: Statement[]) => {
-      const operation = batchChain.then(async () => {
-        database.exec("BEGIN");
-        try {
-          const results = [];
-          for (const statement of statements) results.push(await statement.run());
-          database.exec("COMMIT");
-          return results;
-        } catch (error) {
-          database.exec("ROLLBACK");
-          throw error;
-        }
-      });
-      batchChain = operation.then(() => undefined).catch(() => undefined);
-      return operation;
-    },
-  };
-  // biome-ignore lint/nursery/noUnsafeTypeAssertion: This focused adapter implements only the D1 methods used by this test.
-  return adapter as unknown as D1Database;
-}

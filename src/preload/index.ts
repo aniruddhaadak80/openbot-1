@@ -73,6 +73,8 @@ import {
   decodeDetectedModelServers,
   decodeDiscoverModelsResult,
   decodeExportResult,
+  decodeHostedServer,
+  decodeHostedServerList,
   decodeHostedSite,
   decodeHostedSites,
   decodeMobileConnectedDevices,
@@ -532,6 +534,12 @@ const openbotApi: OpenBotDesktopApi = {
   billing: bridgeGroup(IPC_ENDPOINTS.billing, {
     getState: decodeBillingState,
     openPortal: decodeVoid,
+  }),
+  hostedServers: bridgeGroup(IPC_ENDPOINTS.hostedServers, {
+    list: decodeHostedServerList,
+    create: decodeHostedServer,
+    delete: decodeVoid,
+    wake: decodeHostedServer,
   }),
   customProviders: bridgeGroup(IPC_ENDPOINTS.customProviders, {
     list: decodeCustomProviders,

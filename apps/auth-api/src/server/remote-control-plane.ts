@@ -251,6 +251,14 @@ export class RemoteControlPlane {
     if (existing && existing.owner_user_id !== user.id) {
       throw new RemoteControlPlaneError(403, "host_owner_mismatch", "This host belongs to another account.");
     }
+    // The account server creates hosted server IDs, so only the account it created one for can publish it.
+    const reservation = await this.#database
+      .prepare("SELECT owner_user_id, desired_state FROM hosted_servers WHERE server_id = ? LIMIT 1")
+      .bind(hostId)
+      .first<{ owner_user_id: string; desired_state: string }>();
+    if (reservation && (reservation.owner_user_id !== user.id || reservation.desired_state === "deleted")) {
+      throw new RemoteControlPlaneError(403, "host_owner_mismatch", "This host belongs to another account.");
+    }
     const now = this.#now();
     const devicePublicKey = input.devicePublicKey ?? null;
     const providedMachineTokenHash = input.machineToken ? await sha256(input.machineToken) : null;
@@ -1015,6 +1023,46 @@ export class RemoteControlPlane {
       clientPublicKey: boundClientPublicKey,
       now,
     });
+  }
+
+  /**
+   * Removes a host and its memberships, invites and sessions. Signal closes the host and client
+   * sockets, and each member's devices re-read their server list.
+   */
+  async deleteHost(ownerUserId: string, hostId: string): Promise<void> {
+    const now = this.#now();
+    await this.#database.batch([
+      this.#database
+        .prepare(
+          `INSERT INTO remote_auth_events(event_id, payload, created_at, attempts, next_attempt_at)
+           SELECT lower(hex(randomblob(16))),
+                  json_object('type', 'remote-session-ended', 'hostId', host_id, 'sessionId', session_id),
+                  ?, 0, ?
+             FROM remote_sessions
+            WHERE host_id = ? AND ended_at IS NULL`,
+        )
+        .bind(now, now, hostId),
+      this.#database
+        .prepare(
+          `INSERT INTO remote_auth_events(event_id, payload, created_at, attempts, next_attempt_at)
+           SELECT lower(hex(randomblob(16))),
+                  json_object('type', 'account-servers-changed', 'userId', user_id),
+                  ?, 0, ?
+             FROM remote_memberships
+            WHERE host_id = ? AND status = 'active'`,
+        )
+        .bind(now, now, hostId),
+      this.#database
+        .prepare(
+          "UPDATE remote_hosts SET auth_epoch = auth_epoch + 1, updated_at = ? WHERE host_id = ? AND owner_user_id = ?",
+        )
+        .bind(now, hostId, ownerUserId),
+      this.#authEpochEventStatement(hostId, now, ownerUserId),
+      this.#database
+        .prepare("DELETE FROM remote_hosts WHERE host_id = ? AND owner_user_id = ?")
+        .bind(hostId, ownerUserId),
+    ]);
+    await this.#flushAuthEvents();
   }
 
   async issueHostTicket(hostId: string, machineToken: string) {

@@ -5,6 +5,7 @@ import { type AuthService, AuthServiceError } from "./auth-service";
 import { AvatarUploadError, readAvatarUpload, removeAccountAvatar, storeAccountAvatar } from "./avatar-storage";
 import { BILLING_UNAVAILABLE_STATE, BillingError, type BillingService } from "./billing-service";
 import { sha256 } from "./crypto";
+import type { HostedServerService } from "./hosted-server-service";
 import { readJsonObject } from "./json-body";
 import { type RemoteControlPlane, RemoteControlPlaneError } from "./remote-control-plane";
 import { sendTeamInviteEmail } from "./team-invite-email";
@@ -44,6 +45,7 @@ export interface BrowserApiServices {
   >;
   /** The stored logo of one host version, or null. The handler checks membership and the version first. */
   hostLogo: (hostId: string, version: string) => Promise<Response | null>;
+  hosting: () => Pick<HostedServerService, "list" | "create" | "delete" | "wake">;
   inviteEmailDelivery: () => TeamInviteEmailDelivery | null;
   /** The billing service, or null when this deployment has no Stripe key. */
   billing: () => Pick<BillingService, "getState" | "createPortal"> | null;
@@ -173,6 +175,8 @@ export async function handleBrowserApi(request: Request, services: BrowserApiSer
     }
     const account = await handleAccount(request, path, token, user, services);
     if (account) return account;
+    const hosting = await handleHosting(request, path, user, services);
+    if (hosting) return hosting;
     const administration = await handleAdministration(request, path, user, services);
     if (administration) return administration;
     if (request.method !== "POST")
@@ -282,6 +286,36 @@ async function handleBilling(
   } catch (error) {
     if (error instanceof BillingError) return failure(error.status, error.code, error.message);
     throw error;
+  }
+  return null;
+}
+
+/** The hosted servers of the account. Returns null when the path is not one of them. */
+async function handleHosting(
+  request: Request,
+  path: string,
+  user: AuthUser,
+  services: BrowserApiServices,
+): Promise<Response | null> {
+  if (path === "v2/hosting/servers") {
+    if (request.method === "GET") return json(await services.hosting().list(user));
+    if (request.method !== "POST") return null;
+    const body = await readJsonObject(request);
+    return json(
+      await services
+        .hosting()
+        .create(user, { name: body.name, size: body.size }, request.headers.get("Idempotency-Key")),
+      201,
+    );
+  }
+  const [, encodedServerId, action] = /^v2\/hosting\/servers\/([^/]+)(?:\/(wake))?$/u.exec(path) ?? [];
+  if (encodedServerId === undefined) return null;
+  const serverId = decodeURIComponent(encodedServerId);
+  if (action === "wake" && request.method === "POST") return json(await services.hosting().wake(user, serverId));
+  if (action === undefined && request.method === "DELETE") {
+    const body = await readJsonObject(request);
+    await services.hosting().delete(user, serverId, body.confirmName);
+    return new Response(null, { status: 204, headers: { "Cache-Control": "no-store" } });
   }
   return null;
 }

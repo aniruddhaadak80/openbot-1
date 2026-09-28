@@ -27,6 +27,7 @@ import { mergeConversationPage } from "../conversation/conversation-merge";
 import { createSidebarPreferences } from "../sidebar/sidebar-preferences";
 import { defaultSidebarLayout } from "../sidebar/sidebar-sections";
 import type { WebHostState } from "./web-host-lock";
+import { createWebHostedServerWake } from "./web-hosted-server-wake";
 import {
   createWebWorkspaceRuntime,
   WebHostIncompatibleError,
@@ -86,6 +87,9 @@ interface WebWorkspaceState {
   duplicatingAgentIds: string[];
   sidebarLayout: SidebarLayoutSnapshot;
 }
+/** How long a waking hosted server gets before the next connection attempt. */
+const WAKE_RECONNECT_DELAY_MS = 5_000;
+
 export type WebRuntimeFactory = (
   accountId: string,
   events: WebRuntimeEvents,
@@ -154,6 +158,8 @@ export function createWebWorkspace(
   const queueRevisions = new Map<string, number>();
   const readWrites = new Map<string, Promise<void>>();
   const hostEventListeners = new Set<(event: AgentEvent | TeamRealtimeEvent) => void>();
+  const wakeHostedServer = createWebHostedServerWake(props.accountFetch);
+  let wakeReconnectTimer: number | undefined;
   const runtime = (props.createRuntime ?? createWebWorkspaceRuntime)(
     props.accountId,
     {
@@ -224,6 +230,7 @@ export function createWebWorkspace(
             .catch(report);
           return;
         }
+        if (update.state === "offline" && !update.code) wakeAndReconnect(update.hostId);
         if (update.state === "online") revokedReconnect = false;
         if (update.state === "online" && update.resync) void resync();
       },
@@ -504,6 +511,16 @@ export function createWebWorkspace(
   function retryHosts(): Promise<void> {
     return refreshHosts().catch(() => undefined);
   }
+  /** A hosted server that the provider stopped is offline until it starts. Ask for a start, then connect again. */
+  function wakeAndReconnect(id: string): void {
+    void wakeHostedServer(id).then((waking) => {
+      if (!waking || disposed || hostId !== id) return;
+      window.clearTimeout(wakeReconnectTimer);
+      wakeReconnectTimer = window.setTimeout(() => {
+        if (!disposed && hostId === id && state.status === "offline") void reconnect().catch(report);
+      }, WAKE_RECONNECT_DELAY_MS);
+    });
+  }
   async function reconnect(): Promise<void> {
     const host = state.hosts.find((listed) => listed.hostId === state.host?.hostId) ?? state.host;
     if (!host || state.status === "connecting") return;
@@ -619,7 +636,10 @@ export function createWebWorkspace(
             hostProtocol: { ...error.hostProtocol },
           };
       });
-      if (!(error instanceof WebHostIncompatibleError)) report(error);
+      if (!(error instanceof WebHostIncompatibleError)) {
+        report(error);
+        wakeAndReconnect(host.hostId);
+      }
     }
   }
   async function load(id: string, older = false) {
@@ -854,6 +874,7 @@ export function createWebWorkspace(
     return () => {
       disposed = true;
       generation += 1;
+      window.clearTimeout(wakeReconnectTimer);
       acceptedInvite = null;
       window.removeEventListener("focus", focus);
       void runtime.dispose({ sessionsEnded: props.accountSessionEnded?.() ?? false }).catch(() => undefined);

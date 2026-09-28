@@ -16,24 +16,32 @@ export function migration(name: string): string {
   return readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8");
 }
 
-/** A D1 binding over node:sqlite. D1 runs a batch as one transaction; so does this. */
+/**
+ * A D1 binding over node:sqlite. D1 runs a batch as one transaction; so does this. Batches run one
+ * after another, because two open transactions on one connection fail.
+ */
 export function sqliteD1(database: DatabaseSync): D1Database {
   const unused = () => {
     throw new Error("Unused");
   };
+  let batchChain: Promise<unknown> = Promise.resolve();
   return {
     prepare: (query) => statement(database, query),
-    async batch<T>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]> {
-      database.exec("BEGIN");
-      try {
-        const results: D1Result<T>[] = [];
-        for (const prepared of statements) results.push(await prepared.all<T>());
-        database.exec("COMMIT");
-        return results;
-      } catch (error) {
-        database.exec("ROLLBACK");
-        throw error;
-      }
+    batch<T>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]> {
+      const operation = batchChain.then(async () => {
+        database.exec("BEGIN");
+        try {
+          const results: D1Result<T>[] = [];
+          for (const prepared of statements) results.push(await prepared.all<T>());
+          database.exec("COMMIT");
+          return results;
+        } catch (error) {
+          database.exec("ROLLBACK");
+          throw error;
+        }
+      });
+      batchChain = operation.catch(() => undefined);
+      return operation;
     },
     exec: unused,
     withSession: unused,
@@ -70,13 +78,22 @@ function statement(database: DatabaseSync, query: string, values: SQLInputValue[
       return row ? JSON.parse(JSON.stringify(column ? row[column] : row)) : null;
     },
     async all<T>(): Promise<D1Result<T>> {
-      return result(JSON.parse(JSON.stringify(database.prepare(query).all(...values))), 0);
+      const before = totalChanges(database);
+      const rows = JSON.parse(JSON.stringify(database.prepare(query).all(...values)));
+      return result(rows, totalChanges(database) - before);
     },
     async run<T>(): Promise<D1Result<T>> {
-      return result<T>([], Number(database.prepare(query).run(...values).changes));
+      const before = totalChanges(database);
+      database.prepare(query).run(...values);
+      return result<T>([], totalChanges(database) - before);
     },
     raw() {
       throw new Error("Unused raw");
     },
   };
+}
+
+/** D1 counts the rows that triggers change too, like SQLite `total_changes()`. */
+function totalChanges(database: DatabaseSync): number {
+  return Number(database.prepare("SELECT total_changes() AS changes").get()?.changes);
 }

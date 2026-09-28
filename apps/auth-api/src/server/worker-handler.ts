@@ -1,8 +1,9 @@
 import { routeRequest as routeHostedSiteRequest } from "../../../site-router/src/index";
 import { type AuthRetentionResult, pruneExpiredAuthData } from "./auth-data-retention";
+import { type HostedServerBindings, HostedServerService } from "./hosted-server-service";
 import { HostedSiteService } from "./hosted-site-service";
 import { enforceMarketplaceIngress, MarketplaceRateLimitError } from "./marketplace-request-policy";
-import { deliverPendingRemoteAuthEvents } from "./remote-control-plane";
+import { deliverPendingRemoteAuthEvents, RemoteControlPlane } from "./remote-control-plane";
 import type { WorkerBindings } from "./types";
 
 type WorkerFetch = (request: Request) => Response | Promise<Response>;
@@ -61,12 +62,17 @@ export function createWorkerHandler(
     async scheduled(
       controller: Pick<ScheduledController, "scheduledTime">,
       bindings: Pick<WorkerBindings, "DB" | "REMOTE_AUTH_WEBHOOK_URL" | "REMOTE_AUTH_WEBHOOK_SECRET"> &
-        Partial<Pick<WorkerBindings, "SITES">>,
+        Partial<Pick<WorkerBindings, "SITES" | HostedServerTickBindingKey>>,
     ) {
+      const hosting = bindings.BOAT_API_KEY ? tickHostedServers(bindings, controller.scheduledTime) : null;
       const delivery = deliverRemoteAuthEvents(bindings, controller.scheduledTime);
       const cleanup = bindings.SITES
         ? new HostedSiteService(bindings.DB, bindings.SITES).cleanup(controller.scheduledTime)
         : Promise.resolve(null);
+      const hostingResult = await hosting;
+      if (hostingResult && Object.values(hostingResult).some(Boolean)) {
+        console.info("Hosted server check completed.", hostingResult);
+      }
       if (!isDailyRetentionRun(controller.scheduledTime)) {
         const [, sites] = await Promise.all([delivery, cleanup]);
         if (sites) console.info("Hosted site cleanup completed.", sites);
@@ -77,6 +83,28 @@ export function createWorkerHandler(
       if (sites) console.info("Hosted site cleanup completed.", sites);
     },
   } satisfies ExportedHandler<WorkerBindings>;
+}
+
+type HostedServerTickBindingKey =
+  | Exclude<keyof HostedServerBindings, "DB">
+  | "REMOTE_TICKET_PRIVATE_JWK"
+  | "REMOTE_TICKET_PUBLIC_JWKS"
+  | "REMOTE_TICKET_KEY_ID";
+
+function tickHostedServers(
+  bindings: Pick<WorkerBindings, "DB" | "REMOTE_AUTH_WEBHOOK_URL" | "REMOTE_AUTH_WEBHOOK_SECRET"> &
+    Partial<Pick<WorkerBindings, HostedServerTickBindingKey>>,
+  now: number,
+) {
+  return new HostedServerService(bindings, {
+    removeHost: (ownerUserId, hostId) => new RemoteControlPlane(bindings).deleteHost(ownerUserId, hostId),
+  })
+    .tick(now)
+    .catch(() => {
+      // The next minute checks again. The error can hold SQL or provider detail, so it is not logged.
+      console.warn("Hosted server check failed.");
+      return null;
+    });
 }
 
 async function serveLocalHostedSite(

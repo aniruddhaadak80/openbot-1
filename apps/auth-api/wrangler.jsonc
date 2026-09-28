@@ -169,9 +169,13 @@
       "workers_dev": true,
       "preview_urls": false,
       "routes": [],
+      // Each minute: the cron starts hosted servers that stopped again, and checks servers that a webhook missed.
       "triggers": {
-        "crons": []
+        "crons": ["* * * * *"]
       },
+      // Hosted servers stay off until these are set with `wrangler secret put <name> --env test`:
+      // BOAT_API_KEY, BOAT_WEBHOOK_SECRET, HOSTED_SERVER_TEMPLATE and HOSTED_SERVERS_ALLOWED_USER_IDS.
+      // They are not required, so the test Worker deploys without them. See docs/hosted-servers.md.
       "secrets": {
         "required": [
           "EMAIL_SMTP_PASSWORD",
@@ -192,7 +196,8 @@
         "SITE_COOKIE_ISOLATION_READY": "false",
         "REMOTE_TICKET_KEY_ID": "openbot-remote-1",
         "REMOTE_SIGNAL_URL": "wss://signal.openbot.run/v1/signal",
-        "REMOTE_AUTH_WEBHOOK_URL": "https://signal.openbot.run/internal/auth-events"
+        "REMOTE_AUTH_WEBHOOK_URL": "https://signal.openbot.run/internal/auth-events",
+        "HOSTED_SERVERS_ENABLED": "true"
       },
       "d1_databases": [
         {

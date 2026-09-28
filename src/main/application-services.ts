@@ -91,6 +91,9 @@ import { performDynamicIslandCriticalAction } from "./dynamic-island-actions";
 import { DynamicIslandWindowController } from "./dynamic-island-window";
 import { HostService } from "./host-service";
 import { HostUpdateCoordinator } from "./host-update-coordinator";
+import { applyHostedServerAccount, type HostedServerEnvironment } from "./hosted-server-bootstrap";
+import { HostedServerDesktopService } from "./hosted-server-service";
+import { HostedServerStartRetry } from "./hosted-server-start-retry";
 import { HostedSiteDesktopService } from "./hosted-site-service";
 import { LanguageService } from "./language-service";
 import type { MacHapticFeedback } from "./mac-haptic-feedback";
@@ -188,6 +191,7 @@ const DEVELOPMENT_BUNDLE_IDENTIFIER = "com.github.Electron";
 const TEARDOWN_ORDER = {
   updater: 10,
   hostUpdateCoordinator: 12,
+  hostedServerStartRetry: 13,
   computerUseHighlight: 18,
   computerUsePermissionHelp: 19,
   dynamicIsland: 20,
@@ -219,6 +223,8 @@ export interface ApplicationServiceContext {
   appVariant: AppVariant;
   developmentRemoteRole: DevelopmentRemoteRole | null;
   developmentTestClientEnabled: boolean;
+  /** Set only in a hosted server VM. */
+  hostedServer: HostedServerEnvironment | null;
   macHapticFeedback: MacHapticFeedback;
   teardown: TeardownRegistry;
   forwardCentralAuth: (state: CentralAuthState) => void;
@@ -260,6 +266,7 @@ export interface ApplicationServices {
   skills: SkillMarketplaceService;
   hostedSites: HostedSiteDesktopService;
   billing: BillingDesktopService;
+  hostedServers: HostedServerDesktopService;
   customProviders: CustomProviderStore;
   customProviderChanges: CustomProviderChanges;
   customAgentChanges: CustomAgentChanges;
@@ -314,6 +321,7 @@ export async function createApplicationServices({
   appVariant,
   developmentRemoteRole,
   developmentTestClientEnabled,
+  hostedServer,
   macHapticFeedback,
   teardown,
   forwardCentralAuth,
@@ -425,6 +433,7 @@ export async function createApplicationServices({
   await dataSkill.syncAll(store.list());
   const hostedSites = new HostedSiteDesktopService(centralAuth);
   const billing = new BillingDesktopService(centralAuth, (url) => shell.openExternal(url));
+  const hostedServers = new HostedServerDesktopService(centralAuth);
   const sidebarLayout = new SidebarLayoutStore(join(app.getPath("userData"), SIDEBAR_LAYOUT_FILE));
   await sidebarLayout.initialize();
   const mailbox = new MailboxStore(app.getPath("userData"), store.sharedRoot, store.database);
@@ -886,6 +895,16 @@ export async function createApplicationServices({
       setupCompleted: setupState.completed,
     });
   }
+  // At the same position. A failure leaves the host unconfigured and the app running, so the log
+  // shows why; a throw here would make systemd restart the app with a claim that may be spent.
+  if (hostedServer) {
+    await applyHostedServerAccount({
+      environment: hostedServer,
+      centralAuth,
+      centralAuthInitialization,
+      teamStore,
+    }).catch((error) => logger.error("The hosted server could not sign in:", toLogValue(error)));
+  }
   const teamChatStore = new TeamChatStore(store.database);
   const remoteDesktopRuntime = await resolveRemoteDesktopRuntime({
     isPackaged: app.isPackaged,
@@ -1056,6 +1075,7 @@ export async function createApplicationServices({
       allowLocalDevelopmentInvites: developmentRemoteRole !== null,
       appVersion: app.getVersion(),
       getLocalHostId: () => teamStore.getIdentity()?.serverId ?? null,
+      onHostUnavailable: (serverId) => void hostedServers.wakeUnavailableHost(serverId),
       webrtcTransport: new TeamWebRtcClientTransport({
         bridge: teamWebRtcBridge,
         listHosts: () => centralAuth.listRemoteHosts(),
@@ -1219,6 +1239,17 @@ export async function createApplicationServices({
       return { ok: true, checks: ["initialization-succeeded", "agent-list"] };
     },
   });
+  if (hostedServer) {
+    const hostedServerStartRetry = new HostedServerStartRetry({
+      hostPhase: () => host.getStatus().phase,
+      startHost: () => host.start(),
+      onError: (message, error) => logger.warn(message, toLogValue(error)),
+    });
+    hostedServerStartRetry.start();
+    teardown.push(TEARDOWN_ORDER.hostedServerStartRetry, "the hosted server start retry", () =>
+      hostedServerStartRetry.stop(),
+    );
+  }
   await hostUpdateCoordinator.tick();
   hostUpdateCoordinator.start();
   teardown.push(TEARDOWN_ORDER.hostUpdateCoordinator, "the host update coordinator", () =>
@@ -1254,6 +1285,7 @@ export async function createApplicationServices({
     skills,
     hostedSites,
     billing,
+    hostedServers,
     customProviders,
     customProviderChanges,
     customAgentChanges,

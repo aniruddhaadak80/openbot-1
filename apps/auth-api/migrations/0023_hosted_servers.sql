@@ -1,0 +1,38 @@
+-- New tables only. The Worker that runs before this deploy does not read them.
+-- The owner has no ON DELETE CASCADE: a removed row would leave a paid sandbox with no record.
+CREATE TABLE hosted_servers (
+  server_id TEXT PRIMARY KEY,
+  owner_user_id TEXT NOT NULL REFERENCES users(id),
+  name TEXT NOT NULL,
+  provider TEXT NOT NULL DEFAULT 'boat' CHECK(provider IN ('boat')),
+  provider_sandbox_id TEXT UNIQUE,
+  size TEXT NOT NULL CHECK(size IN ('small', 'default')),
+  desired_state TEXT NOT NULL CHECK(desired_state IN ('running', 'deleted')),
+  observed_state TEXT NOT NULL CHECK(
+    observed_state IN ('creating', 'starting', 'running', 'stopping', 'stopped', 'waking', 'error', 'deleted')
+  ),
+  observed_error TEXT CHECK(
+    observed_error IS NULL OR observed_error IN ('provider_error', 'provider_billing', 'provider_limit', 'start_failed')
+  ),
+  -- The creation time of the newest provider event applied. Older events that arrive late are ignored.
+  provider_event_at INTEGER,
+  last_wake_reason TEXT CHECK(last_wake_reason IS NULL OR last_wake_reason IN ('create', 'message', 'restart')),
+  claim_token_hash TEXT UNIQUE,
+  claim_expires_at INTEGER,
+  claim_redeemed_at INTEGER,
+  auth_session_id TEXT,
+  idempotency_key TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  deleted_at INTEGER,
+  UNIQUE(owner_user_id, idempotency_key)
+);
+
+CREATE INDEX hosted_servers_owner ON hosted_servers(owner_user_id, created_at);
+
+CREATE TABLE hosting_webhook_deliveries (
+  delivery_id TEXT PRIMARY KEY,
+  received_at INTEGER NOT NULL
+);
+
+CREATE INDEX hosting_webhook_deliveries_received ON hosting_webhook_deliveries(received_at);

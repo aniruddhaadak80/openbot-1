@@ -1,0 +1,42 @@
+#!/bin/bash
+# openbot.service runs this as the sandbox user. It waits for the env file that openbot-hosted-env
+# writes, starts a D-Bus session with an unlocked keyring so that Electron `safeStorage` can keep
+# the account session, and runs OpenBot on a virtual display.
+set -euo pipefail
+umask 077
+state="$HOME/.config/openbot-hosted"
+
+if [ "${1:-}" != --in-session ]; then
+  # The setup script starts after the sandbox is ready, so on the first boot this runs first.
+  for _ in $(seq 1 300); do
+    [ -s "$state/env" ] && break
+    sleep 2
+  done
+  [ -s "$state/env" ] || { echo "The hosted server env file is missing." >&2; exit 1; }
+  exec dbus-run-session -- "$0" --in-session
+fi
+
+# Read only the expected keys. The file is data, not a script.
+while IFS='=' read -r key value; do
+  case $key in
+    OPENBOT_HOSTED_HOST_ID | OPENBOT_HOSTED_CLAIM) export "$key=$value" ;;
+  esac
+done <"$state/env"
+while IFS='=' read -r key value; do
+  [ "$key" = OPENBOT_AUTH_API_URL ] && export "$key=$value"
+done </opt/OpenBot/hosted/openbot.env
+export OPENBOT_HOSTED_SERVER=1
+
+# Each server makes its own keyring password on its first start, so no two servers share one.
+# The password only lets the daemon open the keyring without a person; the file is 0600.
+if [ ! -s "$state/keyring-password" ]; then
+  temporary=$(mktemp "$state/keyring-password.XXXXXX")
+  head -c 32 /dev/urandom | base64 | tr -d '\n' >"$temporary"
+  mv -f "$temporary" "$state/keyring-password"
+fi
+eval "$(gnome-keyring-daemon --unlock --components=secrets <"$state/keyring-password")"
+eval "$(gnome-keyring-daemon --start --components=secrets)"
+export GNOME_KEYRING_CONTROL
+
+exec xvfb-run -a -s "-screen 0 1280x800x24 -nolisten tcp" \
+  /opt/OpenBot/app/openbot --password-store=gnome-libsecret

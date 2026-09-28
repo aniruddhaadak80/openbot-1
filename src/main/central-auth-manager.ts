@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { parseHostedServerClaim } from "@openbot/contracts/hosted-servers";
 import type {
   AvatarImageInput,
   CentralAuthIssue,
@@ -725,6 +726,30 @@ export class CentralAuthManager extends EventEmitter<CentralAuthEvents> {
         issue: centralAuthIssue(error, "email_sign_in_failed", sourceText("error.auth.codeNotVerified")),
       });
     }
+  }
+
+  /**
+   * Signs a new hosted server in with the single-use claim that the account server put in its VM.
+   * The result names the host ID that the account server reserved for this account.
+   */
+  async redeemHostedServerClaim(claim: string): Promise<{ hostId: string; name: string; user: CentralAuthUser }> {
+    const redeemed = await this.#request(
+      "/v2/hosting/claims/redeem",
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ claim }) },
+      (value) => {
+        const parsed = parseHostedServerClaim(value);
+        if (!parsed) throw new Error("Invalid hosted server claim.");
+        return parsed;
+      },
+    );
+    if (this.#sessionAccountId !== null && this.#sessionAccountId !== redeemed.user.id) {
+      this.#teamHostTokens.clear();
+    }
+    this.#sessionToken = redeemed.sessionToken;
+    await this.#writeStoredSession();
+    const user = this.#resolveUserAvatar(redeemed.user);
+    this.#setState({ status: "signed_in", user });
+    return { hostId: redeemed.hostId, name: redeemed.name, user };
   }
 
   async logout(): Promise<CentralAuthState> {

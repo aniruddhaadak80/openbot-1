@@ -110,6 +110,8 @@ interface RemoteServerManagerOptions {
   appVersion?: string;
   webrtcTransport?: TeamWebRtcClientTransport;
   getLocalHostId?: () => string | null;
+  /** Signal answered that the host is not connected. A hosted server that stopped is started here. */
+  onHostUnavailable?: (serverId: string) => void;
 }
 
 export interface DevelopmentRemoteServerConnection {
@@ -138,6 +140,7 @@ export class RemoteServerManager extends EventEmitter<RemoteServerEvents> {
   #duplicateOperationIds = new Map<string, string>();
   readonly #webrtcTransport: TeamWebRtcClientTransport | null;
   readonly #getLocalHostId: () => string | null;
+  readonly #onHostUnavailable: (serverId: string) => void;
   readonly #remoteViewerProxy: RemoteViewerProxy | null;
   #selectChain = Promise.resolve();
   #muteExpiryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -162,6 +165,7 @@ export class RemoteServerManager extends EventEmitter<RemoteServerEvents> {
     this.#allowLocalDevelopmentInvites = options.allowLocalDevelopmentInvites ?? false;
     this.#webrtcTransport = options.webrtcTransport ?? null;
     this.#getLocalHostId = options.getLocalHostId ?? (() => null);
+    this.#onHostUnavailable = options.onHostUnavailable ?? (() => undefined);
     this.#client = new RemoteServerClient({
       appVersion: this.#appVersion,
       servers: this.#store,
@@ -243,7 +247,10 @@ export class RemoteServerManager extends EventEmitter<RemoteServerEvents> {
     });
     this.#webrtcTransport?.on("event", (serverId, event) => this.#handleWebRtcEvent(serverId, event));
     this.#webrtcTransport?.on("error", (serverId, code, message) => {
-      if (code === "host_unavailable") this.#events.markHostOffline(serverId);
+      if (code === "host_unavailable") {
+        this.#events.markHostOffline(serverId);
+        this.#onHostUnavailable(serverId);
+      }
       if (!this.#connections.reportTransportError(serverId, code, message)) this.#events.scheduleReconnect(serverId);
       if (code === "session_revoked") this.emit("directoryInvalidated");
     });

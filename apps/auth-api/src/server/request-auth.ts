@@ -5,6 +5,7 @@ import { AuthService, AuthServiceError } from "./auth-service";
 import { BillingError, BillingService } from "./billing-service";
 import { D1AuthRepository } from "./d1-auth-repository";
 import { createEmailCodeDelivery, createTeamInviteEmailDelivery } from "./email-delivery";
+import { HostedServerService, HostedServerServiceError } from "./hosted-server-service";
 import { HostedSiteInputError } from "./hosted-site-contract";
 import { enforceHostedSiteReportRateLimit as enforceReportRateLimit } from "./hosted-site-request-policy";
 import { HostedSiteService } from "./hosted-site-service";
@@ -170,6 +171,20 @@ export function requestTeamInviteEmailDelivery(): TeamInviteEmailDelivery | null
 
 export function requestRemoteControlPlane(): RemoteControlPlane {
   return new RemoteControlPlane(requireWorkerBindings(env), { schedule: waitUntil });
+}
+
+export function requestHostedServerService(): HostedServerService {
+  const bindings = requireWorkerBindings(env);
+  return new HostedServerService(bindings, {
+    removeHost: (ownerUserId, hostId) =>
+      new RemoteControlPlane(bindings, { schedule: waitUntil }).deleteHost(ownerUserId, hostId),
+  });
+}
+
+export function hostedServerErrorResponse(error: unknown): Response {
+  if (error instanceof HostedServerServiceError) return apiError(error.status, error.code, error.message);
+  if (error instanceof HostedSiteInputError) return apiError(error.status, error.code, error.message);
+  return remoteControlPlaneErrorResponse(error);
 }
 
 export function verifyRemoteServiceRequest(request: Request, body: string): Promise<boolean> {

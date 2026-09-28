@@ -32,6 +32,13 @@ export interface WorkerBindings {
   REMOTE_AUTH_WEBHOOK_SECRET?: string;
   STRIPE_SECRET_KEY?: string;
   STRIPE_WEBHOOK_SECRET?: string;
+  HOSTED_SERVERS_ENABLED?: string;
+  /** Comma-separated account IDs that can create hosted servers. */
+  HOSTED_SERVERS_ALLOWED_USER_IDS?: string;
+  /** The boat named snapshot that new hosted servers start from. */
+  HOSTED_SERVER_TEMPLATE?: string;
+  BOAT_API_KEY?: string;
+  BOAT_WEBHOOK_SECRET?: string;
 }
 
 function isWorkerBindings(value: unknown): value is WorkerBindings {

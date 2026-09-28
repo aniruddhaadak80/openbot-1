@@ -1559,6 +1559,16 @@ clears navigation history; manual takeover
 completion alone cannot release it. Secrets are not retried. Authentication inside unsupported frames,
 unclear OAuth account selection, CAPTCHA, passkeys, and payment confirmation use takeover.
 
+## Hosted servers
+
+A hosted server is one [boat](https://boat.dev) sandbox for one account. It runs the Linux
+OpenBot build under Xvfb and is a normal Remote host after its first start. The account Worker
+owns the sandbox lifecycle: it creates, resumes and deletes sandboxes, and D1 keeps the desired
+and observed state. A server runs all the time: it never asks to stop. When boat stops a sandbox,
+the Worker resumes it, and clients ask the Worker to start it when a connection fails. No message
+waits in the Worker while a server is stopped; the client keeps it and connects again. The Worker's boat key cannot read files or run commands in a
+sandbox. See [hosted servers](hosted-servers.md) for the flow, the configuration and the template.
+
 ## Shared UI package
 
 `@openbot/ui` owns the existing SolidJS primitives and their primitive stylesheet. Desktop,

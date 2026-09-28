@@ -17,6 +17,12 @@
 import type { ManagedProviderId } from "./agent-providers";
 import type { AppLanguagePreference, SetAppLanguagePreferenceInput } from "./app-language";
 import type { BillingPortalRequest, BillingState } from "./billing";
+import type {
+  CreateHostedServerInput,
+  DeleteHostedServerInput,
+  HostedServerList,
+  HostedServerSummary,
+} from "./hosted-servers";
 import type { AddedAgent, AgentAdminSettings, UpdateAgentAdminSettingsInput } from "./ipc-agent-admin";
 import type { AgentAnalytics, AgentAnalyticsInput } from "./ipc-agent-analytics";
 import type { AgentIpcRequest, ScopedAgentEvent } from "./ipc-agent-events";
@@ -551,6 +557,14 @@ export const IPC_ENDPOINTS = {
   billing: {
     getState: request<undefined, BillingState>()("billing:get-state"),
     openPortal: request<BillingPortalRequest, void>()("billing:open-portal"),
+  },
+  // OpenBot servers that the account server runs for this account. `wake` also works for a server
+  // that the account is a member of; it answers 404 for a host that is not a hosted server.
+  hostedServers: {
+    list: request<undefined, HostedServerList>()("hosted-servers:list"),
+    create: request<CreateHostedServerInput, HostedServerSummary>()("hosted-servers:create"),
+    delete: request<DeleteHostedServerInput, void>()("hosted-servers:delete"),
+    wake: request<string, HostedServerSummary>()("hosted-servers:wake"),
   },
   marketplaceAgents: {
     list: request<MarketplaceAgentQuery | undefined, MarketplaceAgentPage>()("marketplace-agents:list"),

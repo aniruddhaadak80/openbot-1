@@ -15,6 +15,7 @@ export interface AppPort {
   agentTemplates: Pick<OpenBotDesktopApi["agentTemplates"], "onOpenLink" | "takePendingLink">;
   hostedSites: OpenBotDesktopApi["hostedSites"];
   billing: OpenBotDesktopApi["billing"];
+  hostedServers: OpenBotDesktopApi["hostedServers"];
   plugins: Pick<OpenBotDesktopApi["plugins"], "onOpenListing" | "takePendingListing">;
   servers: Pick<OpenBotDesktopApi["servers"], "onInvite" | "takePendingInvite">;
 }

@@ -96,6 +96,7 @@ import { createMockAuth, type MockAuthOptions } from "./mock-auth";
 import { createMockBilling } from "./mock-billing";
 import { createMockBrowser, type MockBrowserOptions } from "./mock-browser";
 import { createMockChannels } from "./mock-channels";
+import { createMockHostedServers } from "./mock-hosted-servers";
 import { createMockProviderRuntimes, type MockProviderRuntimeOptions } from "./mock-provider-runtimes";
 import { applySidebarLayoutAction } from "./mock-sidebar-layout";
 import { createMockSkills, type MockSkillsOptions } from "./mock-skills";
@@ -555,6 +556,7 @@ export function createMockOpenBot(options: MockOpenBotOptions = {}): MockOpenBot
       },
     },
     billing: createMockBilling(),
+    hostedServers: createMockHostedServers(),
     customProviders: {
       list: async () => clone(customProviders),
       /**

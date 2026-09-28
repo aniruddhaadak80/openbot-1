@@ -83,6 +83,8 @@ export type SkillsDesktopApi = GroupApi<IpcEndpoints["skills"]>;
 export type HostedSitesDesktopApi = GroupApi<IpcEndpoints["hostedSites"]>;
 export type BillingDesktopApi = GroupApi<IpcEndpoints["billing"]>;
 
+export type HostedServersDesktopApi = GroupApi<IpcEndpoints["hostedServers"]>;
+
 /**
  * The user's own model endpoints. `save` and `delete` both answer with the whole list plus how the
  * provider restart went, so the renderer replaces its snapshot in one write and can say honestly
@@ -138,6 +140,7 @@ export interface OpenBotDesktopApi extends GroupApi<IpcEndpoints["app"]>, GroupA
   agentImport: AgentImportDesktopApi;
   hostedSites: HostedSitesDesktopApi;
   billing: BillingDesktopApi;
+  hostedServers: HostedServersDesktopApi;
   marketplaceAgents: MarketplaceAgentsDesktopApi;
   agentTemplates: AgentTemplatesDesktopApi;
   auth: CentralAuthDesktopApi;
