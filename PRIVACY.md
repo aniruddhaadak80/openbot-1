@@ -32,6 +32,15 @@ message content, file content, or search queries to telemetry.
 Production builds of OpenBot desktop, the configured mobile app, and the website use a self-hosted OpenPanel service for product
 analytics. Development builds, previews, tests, and Storybook do not send analytics.
 
+The production account service also sends OpenPanel an event when a paid plan or a hosted server
+changes: a Checkout starts or expires, a plan starts, changes, is cancelled or ends, a payment
+succeeds or fails, the Customer Portal opens, or a hosted server is set up, fails to set up, stops
+after no use, starts, changes its machine, stops at the end of its plan, is renewed or is deleted.
+Each event has your account ID and only fixed values: the action, the plan, the billing period, the
+currency, the amount that Stripe reports, the server size, the start reason and an error code. It has
+no email, name, Stripe ID or server ID. The desktop analytics setting does not stop these events,
+because the account service sends them and not your computer.
+
 ## Agent and host usage
 
 The Usage view stores numeric token counts, activity counts, provider and model identifiers,
@@ -162,7 +171,7 @@ The service stores:
   gives back the same link. Deleting the account removes them. Templates do not include
   workspace files, memories, conversations, or integration credentials.
 - billing records when the account starts a paid plan: the Stripe customer ID, and for
-  each subscription the Stripe subscription ID, plan, billing period, currency, status, period end,
+  each subscription the Stripe subscription ID, plan, billing period, currency, price, status, period end,
   and whether it ends at the period end. The service also keeps the ID, type and receive time of each
   Stripe webhook event for 7 days, to ignore a repeated event. These records hold no card data.
 
@@ -176,7 +185,7 @@ the avatar without an account session.
 
 ## Hosted servers
 
-Hosted servers are available only to development accounts at this time. A hosted server is an
+Hosted servers are available only to the accounts that the account service allows. A hosted server is an
 OpenBot computer that runs in a [boat](https://boat.dev) sandbox in the EU (Germany, Finland or
 France). The sandbox holds the server's workspaces, conversations, attachments, browser data and
 team data, the same as your own computer would. The server stops after 15 minutes with no use and
@@ -190,6 +199,11 @@ sandbox ID, a hash of the one-time setup claim, the time of its last use, and cr
 server is deleted, its record stays so that the service never loses track of a sandbox. It also
 stores the ID and receive time of each boat webhook delivery for 7 days. The account service does
 not receive the server's conversations, files or commands, and its boat key cannot read them.
+
+The account service gives each sandbox a name in boat, so that an operator can find a server in the
+boat dashboard: `openbot-`, the plan, your account email with each other character as `-`, and the
+first 8 characters of the server ID, such as `openbot-starter-ada-example-com-1a2b3c4d`. boat keeps
+the name with the sandbox.
 
 ## Central data retention
 

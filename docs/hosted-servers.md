@@ -5,9 +5,9 @@ when the user's computer is off. Each server is one boat sandbox for one account
 the Linux build of OpenBot under Xvfb. The server runs while it is in use. After 15 minutes with no
 use, the Worker stops it and keeps its data, and the next client starts it again.
 
-Hosted servers are a development feature. Only the `test` Worker environment enables them, and
-only for the account IDs in `HOSTED_SERVERS_ALLOWED_USER_IDS`, and only when the Worker has
-`STRIPE_SECRET_KEY`. Each server has its own Stripe plan. Its machine comes from the plan
+The Worker enables hosted servers only when it has the boat and Stripe secrets, and only for the
+account IDs in `HOSTED_SERVERS_ALLOWED_USER_IDS` (`*` allows each account). See
+[Production](#production). Each server has its own Stripe plan. Its machine comes from the plan
 (`HOSTED_PLAN_SIZE`): Starter is boat `small`, Standard is `default`, and Pro is `large`.
 
 ## Parts
@@ -43,7 +43,15 @@ when a server is idle or boat stops a sandbox; and `error` and `deleted`. The Wo
    `HOSTED_SERVER_TEMPLATE` with `noEnv: true`, so no operator secret or repository goes into the
    sandbox. The sandbox env holds only `OPENBOT_HOSTED_HOST_ID` and `OPENBOT_HOSTED_CLAIM`. The cron
    provisions a paid row when the webhook call failed, and deletes an unpaid row after 24 hours
-   (it has no sandbox, so no data is lost).
+   (it has no sandbox, so no data is lost). Before that delete it closes the Checkout; a Checkout
+   that is paid keeps the row for the webhook. A row that stays in `creating` with no sandbox for 10
+   minutes (the Worker stopped during the create call) goes to `error`, and the setup retry below
+   applies. When that create call returns later, the Worker deletes the sandbox that no row owns.
+
+   The Worker then names the sandbox `openbot-<plan>-<owner email>-<first 8 characters of the host
+   ID>` (`PATCH /sandboxes/:id`), so an operator can find it in the boat dashboard. Each character of
+   the email that is not a letter or a digit becomes `-`. The name is only a label; a plan change
+   renames the sandbox.
 3. **Env handoff.** boat puts the sandbox env in the setup script, not in systemd. The Worker sends
    `setupScript: exec /opt/OpenBot/hosted/openbot-hosted-env`. That helper writes the two values to
    `~/.config/openbot-hosted/env` (mode 0600). `openbot.service` waits for this file.
@@ -88,7 +96,9 @@ when a server is idle or boat stops a sandbox; and `error` and `deleted`. The Wo
 
    After a failed renewal, Stripe moves the period end forward and retries the payment, so the
    server keeps running while the plan is `past_due`. When Stripe stops the retries, it cancels the
-   plan and the server stops. A cancel at the period end (`cancel_at_period_end` or `cancel_at`)
+   plan and the server stops. This needs the Stripe setting in [Production](#production): with
+   "leave the subscription past-due", Stripe moves the period end at each renewal and the server
+   runs with no payment. A cancel at the period end (`cancel_at_period_end` or `cancel_at`)
    shows the end date and keeps the server running until then.
 8. **Plan change.** In the Customer Portal an upgrade is charged at once, and a downgrade or a
    shorter interval starts at the next period. The Worker copies the new plan, interval and currency
@@ -125,7 +135,7 @@ with `wrangler secret put <name> --env test` from `apps/auth-api`:
 
 | Name | Value |
 | --- | --- |
-| `BOAT_API_KEY` | A boat key limited to sandbox create, get, list, stop, resume and delete. Do not give it file, command, prompt or desktop access: this key must not read user data. |
+| `BOAT_API_KEY` | A boat key limited to sandbox create, get, list, update, stop, resume and delete. The Worker uses update (`PATCH`) for the lease and the name. Do not give it file, command, prompt or desktop access: this key must not read user data. |
 | `BOAT_WEBHOOK_SECRET` | The signing secret of the boat webhook below. |
 | `HOSTED_SERVER_TEMPLATE` | The named snapshot from the template build, such as `openbot-server-0-9-0`. |
 | `HOSTED_SERVERS_ALLOWED_USER_IDS` | Comma-separated account IDs that can create servers. |
@@ -135,6 +145,48 @@ Register a boat webhook to `https://<test Worker origin>/v2/hosting/boat/webhook
 HMAC signature, refuses a delivery older than 5 minutes, and ignores a delivery ID it has seen.
 
 Point your desktop development build at the test Worker with `OPENBOT_AUTH_API_URL`.
+
+## Production
+
+The production Worker has `HOSTED_SERVERS_ENABLED=true` in `wrangler.jsonc`. Nothing starts until
+the secrets below are set. Set `HOSTED_SERVERS_ENABLED` to `false` to stop new servers; existing
+servers, their webhooks and the cron continue.
+
+1. **boat.** Use a paid boat account: a trial allows 2 sandboxes and only `small` and `default`, so
+   Pro (`large`) fails. Make the Worker key with the scope in the table above.
+2. **Template.** Build it from the release AppImage with the production account service:
+   `bun run hosting:template --version=<v> --appimage-url=<release AppImage URL>
+   --appimage-sha256=<hex> --auth-api-url=https://api.openbot.run`. Build a new template for each
+   release. A new template applies only to new servers.
+3. **boat webhook.** Register `https://api.openbot.run/v2/hosting/boat/webhook` for `sandbox.ready`,
+   `sandbox.error`, `sandbox.archived` and `sandbox.hydrated`, and keep its signing secret.
+4. **Stripe.** Put the live key in `.env.production` (`bunx dotenvx set STRIPE_SECRET_KEY <key> -f
+   apps/auth-api/.env.production -fk .env.keys`), so it is not in the shell history. Then run
+   `bunx dotenvx run -f apps/auth-api/.env.production -fk .env.keys -- bun scripts/stripe-bootstrap.ts
+   --live --webhook-url https://api.openbot.run/v1/stripe/webhook`. It makes the six Prices, the Customer Portal settings
+   and the webhook endpoint, and prints the signing secret one time. In the Stripe Dashboard (live
+   mode), in the failed-payment settings for subscriptions (Revenue recovery → Retries), set "If all
+   retries for a payment fail" to cancel the subscription or to mark it unpaid. Both stop the server.
+5. **OpenPanel.** In the production project, make a server client. Its ID and secret send the
+   billing and server events in [ANALYTICS.md](../ANALYTICS.md). Only production gets them.
+6. **Secrets.** The `Deploy Cloudflare production` job in `.github/workflows/ci.yml` sends these
+   from the `cloudflare-production` GitHub Environment. It refuses a pair with one value and a
+   Stripe key that is not live. A value that is not set keeps the value that the Worker has.
+
+   | Name | Kind | Value |
+   | --- | --- | --- |
+   | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | secrets, a pair | The live key and the secret from step 4 |
+   | `BOAT_API_KEY`, `BOAT_WEBHOOK_SECRET` | secrets, a pair | The key from step 1 and the secret from step 3 |
+   | `OPENPANEL_CLIENT_ID`, `OPENPANEL_CLIENT_SECRET` | secrets, a pair | The client from step 5 |
+   | `HOSTED_SERVER_TEMPLATE` | variable | The snapshot name from step 2 |
+   | `HOSTED_SERVERS_ALLOWED_USER_IDS` | variable | Account IDs, or `*` for each account |
+
+   `bun run api:deploy` sends the same names from `.env.production` and checks them the same way.
+7. **Check.** After the deploy, sign in with an allowed account, add a Starter server, pay, and
+   connect from the desktop and the web client. Delete the server at the end.
+
+The cron runs each 5 minutes in production. An idle server stops 15 to 20 minutes after its last
+use, and the checks that repair a missed webhook run at most 5 minutes late.
 
 ## Build the server template
 
@@ -222,5 +274,7 @@ These were not tested on boat. Test them before a user gets access:
   show 12, 50 and 100 GB, which is not more than the machine table. The disk of `large` was not
   measured, so the 100 GB of Pro is not confirmed;
 - that boat frees the key of a refused create, so a retry of a setup that failed works;
+- the menu path of the Stripe failed-payment setting in [Production](#production), and whether test
+  mode and live mode keep separate values;
 - whether boat stops a sandbox that runs for weeks. The Worker restarts it, but work in progress
   at that time stops.

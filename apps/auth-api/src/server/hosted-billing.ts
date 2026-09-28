@@ -8,7 +8,12 @@ import {
 import type { WorkerBindings } from "./types";
 
 export type HostedBillingBindings = HostedServerBindings &
-  Partial<Pick<WorkerBindings, "STRIPE_SECRET_KEY" | "STRIPE_WEBHOOK_SECRET" | "OPENPANEL_CLIENT_SECRET">>;
+  Partial<
+    Pick<
+      WorkerBindings,
+      "STRIPE_SECRET_KEY" | "STRIPE_WEBHOOK_SECRET" | "OPENPANEL_CLIENT_ID" | "OPENPANEL_CLIENT_SECRET"
+    >
+  >;
 
 /**
  * Billing and hosted servers, linked in both directions: a server starts a Checkout, and a stored
@@ -24,6 +29,7 @@ export function createHostedBilling(
   },
 ): { billing: BillingService | null; hosting: HostedServerService } {
   const analytics = createAccountAnalytics({
+    clientId: bindings.OPENPANEL_CLIENT_ID,
     clientSecret: bindings.OPENPANEL_CLIENT_SECRET,
     fetch: (input, init) => fetch(input, init),
     schedule: options.schedule,

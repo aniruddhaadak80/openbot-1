@@ -34,13 +34,14 @@ export interface WorkerBindings {
   STRIPE_SECRET_KEY?: string;
   STRIPE_WEBHOOK_SECRET?: string;
   HOSTED_SERVERS_ENABLED?: string;
-  /** Comma-separated account IDs that can create hosted servers. */
+  /** Comma-separated account IDs that can create hosted servers. `*` allows each account. */
   HOSTED_SERVERS_ALLOWED_USER_IDS?: string;
   /** The boat named snapshot that new hosted servers start from. */
   HOSTED_SERVER_TEMPLATE?: string;
   BOAT_API_KEY?: string;
   BOAT_WEBHOOK_SECRET?: string;
-  /** The write-only OpenPanel Client Secret for account events. Set only in production. */
+  /** An OpenPanel server client and its write-only secret, for account events. Set only in production. */
+  OPENPANEL_CLIENT_ID?: string;
   OPENPANEL_CLIENT_SECRET?: string;
 }
 

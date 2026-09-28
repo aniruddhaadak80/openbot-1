@@ -93,6 +93,7 @@ type HostedServerTickBindingKey =
   | "REMOTE_TICKET_KEY_ID"
   | "STRIPE_SECRET_KEY"
   | "STRIPE_WEBHOOK_SECRET"
+  | "OPENPANEL_CLIENT_ID"
   | "OPENPANEL_CLIENT_SECRET";
 
 function tickHostedServers(

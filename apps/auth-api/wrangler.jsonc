@@ -13,8 +13,9 @@
   "observability": {
     "enabled": true
   },
-  // The outbox and the hosted-site cleanup are both retry paths: the request path schedules the
-  // first attempt itself. A run each minute only repeated empty reads.
+  // The outbox, the hosted-site cleanup and the hosted server checks are retry paths: the request path
+  // and the webhooks do the first attempt. A run each minute only repeated empty reads. An idle server
+  // stops 15 to 20 minutes after its last use.
   "triggers": {
     "crons": ["*/5 * * * *"]
   },
@@ -46,7 +47,9 @@
     "EMAIL_FROM": "hello@openbot.run",
     "REMOTE_TICKET_KEY_ID": "openbot-remote-1",
     "REMOTE_SIGNAL_URL": "wss://signal.openbot.run/v1/signal",
-    "REMOTE_AUTH_WEBHOOK_URL": "https://signal.openbot.run/internal/auth-events"
+    "REMOTE_AUTH_WEBHOOK_URL": "https://signal.openbot.run/internal/auth-events",
+    // Creates stay off until the boat and Stripe secrets are set. "false" stops new servers only.
+    "HOSTED_SERVERS_ENABLED": "true"
   },
   "d1_databases": [
     {

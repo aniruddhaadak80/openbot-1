@@ -22,7 +22,14 @@ async function main(): Promise<void> {
   await putRequiredSecret("REMOTE_TICKET_PRIVATE_JWK");
   await putRequiredSecret("REMOTE_TICKET_PUBLIC_JWKS");
   await putRequiredSecret("REMOTE_AUTH_WEBHOOK_SECRET");
+  assertStripeKeyMode();
   await putOptionalSecretPair("STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET");
+  await putOptionalSecretPair("BOAT_API_KEY", "BOAT_WEBHOOK_SECRET");
+  // An unset value keeps the value that the Worker has: a new template is set for each release.
+  await putOptionalSecret("HOSTED_SERVER_TEMPLATE");
+  await putOptionalSecret("HOSTED_SERVERS_ALLOWED_USER_IDS");
+  // Only production sends account events, so a test Worker does not add events to the production project.
+  if (!cloudflareEnvironment) await putOptionalSecretPair("OPENPANEL_CLIENT_ID", "OPENPANEL_CLIENT_SECRET");
   await run(wranglerExecutable, ["d1", "migrations", "apply", "DB", "--remote", ...environmentArgs], {
     label: "Remote D1 migrations",
   });
@@ -46,14 +53,31 @@ async function putRequiredSecret(name: string): Promise<void> {
   });
 }
 
+/** A test Worker must never take real payments, and production must never take test payments. */
+function assertStripeKeyMode(): void {
+  const key = process.env.STRIPE_SECRET_KEY?.trim();
+  if (!key) return;
+  const live = key.startsWith("sk_live_") || key.startsWith("rk_live_");
+  if (cloudflareEnvironment && live) {
+    throw new Error(`STRIPE_SECRET_KEY is a live key. The ${cloudflareEnvironment} Worker takes only test keys.`);
+  }
+  if (!cloudflareEnvironment && !live)
+    throw new Error("STRIPE_SECRET_KEY is not a live key. Production takes only live keys.");
+}
+
+async function putOptionalSecret(name: string): Promise<void> {
+  if (process.env[name]?.trim()) await putRequiredSecret(name);
+}
+
 /**
- * Billing is optional: the Worker turns it off without these secrets. Set both or neither, because a
- * key without its webhook secret takes payments that never reach the database.
+ * Billing, hosting and account events are optional: the Worker turns each off without its secrets.
+ * Set both or neither. A Stripe or boat key without its webhook secret takes payments or makes
+ * sandboxes that the Worker never sees.
  */
 async function putOptionalSecretPair(first: string, second: string): Promise<void> {
   const present = [first, second].filter((name) => process.env[name]?.trim());
   if (present.length === 0) {
-    logger.info(`${first} and ${second} are not set. Billing stays off.`);
+    logger.info(`${first} and ${second} are not set. The Worker keeps its current values.`);
     return;
   }
   if (present.length === 1) {

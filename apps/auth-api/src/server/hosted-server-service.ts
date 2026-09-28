@@ -190,7 +190,9 @@ export class HostedServerService {
   }
 
   isAvailableFor(userId: string): boolean {
-    return this.#enabled && this.#billing !== null && this.#allowedUserIds.has(userId);
+    return (
+      this.#enabled && this.#billing !== null && (this.#allowedUserIds.has("*") || this.#allowedUserIds.has(userId))
+    );
   }
 
   /** The plans and prices that the create dialog shows. */
