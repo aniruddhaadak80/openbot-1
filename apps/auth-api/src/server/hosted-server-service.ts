@@ -20,6 +20,7 @@ import {
   type HostedServerSummary,
 } from "@openbot/contracts/hosted-servers";
 import { isDynamicRecord, isOneOf, isString } from "@openbot/contracts/runtime-values";
+import { type AccountAnalytics, type AccountAnalyticsEvent, NO_ACCOUNT_ANALYTICS } from "./account-analytics";
 import { getServerEntitlement } from "./billing-entitlement";
 import { BillingError, type BillingReturnTarget, type BillingService, type SubscriptionSync } from "./billing-service";
 import {
@@ -51,6 +52,13 @@ const UNPAID_RETENTION_MS = 24 * 60 * 60_000;
  * key of a create that failed before the sandbox existed in about 2 minutes.
  */
 const SETUP_RETRY_AFTER_MS = 10 * 60_000;
+/**
+ * A create call ends in seconds. A server in `creating` this long lost its Worker during the call, so
+ * the cron marks the setup failed and sets it up again.
+ */
+const CREATE_LOST_AFTER_MS = 10 * 60_000;
+/** boat allows 120 characters in a sandbox name. */
+const SANDBOX_NAME_MAX_LENGTH = 120;
 /** A server that reports no activity this long stops. The next use starts it again. */
 const IDLE_STOP_AFTER_MS = 15 * 60_000;
 /**
@@ -129,6 +137,7 @@ export interface HostedServerServiceOptions {
   removeHost?: ((ownerUserId: string, hostId: string) => Promise<void>) | null | undefined;
   /** Null when the deployment has no Stripe key. Then no server can be created, and plans are not checked. */
   billing?: HostedServerBilling | null;
+  analytics?: AccountAnalytics;
 }
 
 /** Where Stripe sends the user back after Checkout. */
@@ -159,6 +168,7 @@ export class HostedServerService {
   readonly #now: () => number;
   readonly #removeHost: ((ownerUserId: string, hostId: string) => Promise<void>) | null;
   readonly #billing: HostedServerBilling | null;
+  readonly #analytics: AccountAnalytics;
 
   constructor(bindings: HostedServerBindings, options: HostedServerServiceOptions = {}) {
     this.#database = bindings.DB;
@@ -176,6 +186,7 @@ export class HostedServerService {
     this.#now = options.now ?? Date.now;
     this.#removeHost = options.removeHost ?? null;
     this.#billing = options.billing ?? null;
+    this.#analytics = options.analytics ?? NO_ACCOUNT_ANALYTICS;
   }
 
   isAvailableFor(userId: string): boolean {
@@ -311,7 +322,13 @@ export class HostedServerService {
       .prepare("UPDATE hosted_servers SET desired_state = 'deleted', updated_at = ? WHERE server_id = ?")
       .bind(this.#now(), serverId)
       .run();
-    await this.#finishDelete({ ...row, desired_state: "deleted" });
+    this.#track(row, { name: "hosted_server_action", action: "deleted", plan: row.plan, size: row.size });
+    // A payment that the webhook stored after the first cancel. A later one sees the deleted row.
+    await this.#billing?.cancelServerPlans(row.owner_user_id, row.server_id).catch((error: unknown) => {
+      console.warn("Hosted server plan cancel failed.", { serverId: row.server_id, error: safeErrorCode(error) });
+    });
+    // Read again: a setup that ran at the same time can have stored its sandbox.
+    await this.#finishDelete(await this.#requireRow(serverId));
   }
 
   async wake(user: AuthUser, serverId: string): Promise<HostedServerSummary> {
@@ -344,9 +361,13 @@ export class HostedServerService {
         .run();
       // A server that still stops starts again when the provider reports that it stopped.
       await this.#wake(await this.#requireRow(serverId), "message");
-      return summary(await this.#requireRow(serverId));
+    } else if (!(await this.#retrySetup(row))) {
+      await this.#wake(row, "message");
     }
-    if (!(await this.#retrySetup(row))) await this.#wake(row, "message");
+    const current = await this.#requireRow(serverId);
+    // A client asks for a start because it cannot reach the server. When the row says it runs, a lost
+    // provider event can hide a stop, so the provider is asked.
+    if (current.observed_state === "running" && current.provider_sandbox_id) await this.#refresh(current);
     return summary(await this.#requireRow(serverId));
   }
 
@@ -517,17 +538,19 @@ export class HostedServerService {
       });
       const abandoned = await this.#database
         .prepare(
-          `UPDATE hosted_servers SET desired_state = 'deleted', observed_state = 'deleted', checkout_session_id = NULL,
-             deleted_at = ?, updated_at = ?
+          `SELECT ${ROW_COLUMNS} FROM hosted_servers
            WHERE observed_state = 'awaiting_payment' AND desired_state = 'running' AND updated_at <= ?
              AND NOT EXISTS(
                SELECT 1 FROM billing_subscriptions s
                WHERE s.server_id = hosted_servers.server_id AND s.status IN ${OPEN_STATUSES_SQL}
-             )`,
+             )
+           LIMIT ?`,
         )
-        .bind(now, now, now - UNPAID_RETENTION_MS)
-        .run();
-      result.abandoned = abandoned.meta.changes;
+        .bind(now - UNPAID_RETENTION_MS, TICK_BATCH_SIZE)
+        .all<HostedServerRow>();
+      await run(abandoned.results, async (row) => {
+        if (await this.#removeUnpaid(row, now)) result.abandoned += 1;
+      });
       const failedSetups = await this.#database
         .prepare(
           `SELECT ${ROW_COLUMNS} FROM hosted_servers
@@ -540,6 +563,14 @@ export class HostedServerService {
         if (await this.#retrySetup(row)) result.provisioned += 1;
       });
     }
+    await this.#database
+      .prepare(
+        `UPDATE hosted_servers SET observed_state = 'error', observed_error = 'provider_error', claim_token_hash = NULL,
+           updated_at = ?
+         WHERE observed_state = 'creating' AND provider_sandbox_id IS NULL AND updated_at <= ?`,
+      )
+      .bind(now, now - CREATE_LOST_AFTER_MS)
+      .run();
     // A running server with no use for 15 minutes stops. A state change also counts as use, so a new or
     // resized server has time for its first client.
     const unused = await this.#database
@@ -578,18 +609,7 @@ export class HostedServerService {
       )
       .bind(now - STUCK_AFTER_MS, TICK_BATCH_SIZE)
       .all<HostedServerRow>();
-    result.reconciled = await run(stuck.results, async (row) => {
-      const sandboxId = row.provider_sandbox_id;
-      if (!sandboxId) return;
-      const state = await boat.getSandbox(sandboxId).then(
-        (sandbox) => sandbox.state,
-        (error: unknown) => {
-          if (error instanceof BoatApiError && error.status === 404) return "cancelled" as const;
-          throw error;
-        },
-      );
-      await this.#observe(row, state, now);
-    });
+    result.reconciled = await run(stuck.results, (row) => this.#refresh(row));
     // The Stripe webhook starts a resize at once. This catches a server that was busy then, or a failed stop.
     const resizing = await this.#database
       .prepare(
@@ -620,7 +640,8 @@ export class HostedServerService {
   ): Promise<HostedServerCheckout> {
     // A new server waits for its first payment. A server whose plan was cancelled gets a new plan.
     const awaiting = row.observed_state === "awaiting_payment" && row.desired_state === "running";
-    const ended = row.desired_state === "stopped" && row.observed_error === "plan_ended";
+    // Only the end of a plan sets `stopped`. A provider error on the way can replace the reason.
+    const ended = row.desired_state === "stopped";
     if (!awaiting && !ended) return { server: summary(row), checkoutUrl: null };
     // A plan that is open but not paid gets its payment in the Customer Portal, not a second plan.
     if (ended && (await this.#openPlanExists(row))) {
@@ -644,8 +665,7 @@ export class HostedServerService {
       .prepare(
         `UPDATE hosted_servers SET checkout_session_id = ?, updated_at = ?
          WHERE server_id = ? AND checkout_session_id IS ?
-           AND ((observed_state = 'awaiting_payment' AND desired_state = 'running')
-             OR (desired_state = 'stopped' AND observed_error = 'plan_ended'))`,
+           AND ((observed_state = 'awaiting_payment' AND desired_state = 'running') OR desired_state = 'stopped')`,
       )
       .bind(session.sessionId, this.#now(), row.server_id, previous)
       .run();
@@ -673,6 +693,7 @@ export class HostedServerService {
       )
       .bind(sync.plan, sync.interval, sync.currency, size, size, size, this.#now(), row.server_id)
       .run();
+    if (row.provider_sandbox_id) await this.#rename({ ...row, plan: sync.plan }, row.provider_sandbox_id);
   }
 
   /**
@@ -760,23 +781,90 @@ export class HostedServerService {
         if (error instanceof BoatApiError && error.code === "network_error") return boat.createSandbox(request);
         throw error;
       });
-      await this.#database
+      const stored = await this.#database
         .prepare(
           `UPDATE hosted_servers SET provider_sandbox_id = ?, observed_state = ?, updated_at = ?
            WHERE server_id = ? AND observed_state = 'creating'`,
         )
         .bind(sandbox.id, isUsable(sandbox.state) ? "running" : "starting", this.#now(), row.server_id)
         .run();
+      if (stored.meta.changes !== 1) {
+        // The cron gave up on this create, so no row owns the sandbox. It costs money until it is deleted.
+        console.warn("Hosted server sandbox has no row.", { serverId: row.server_id });
+        await boat.deleteSandbox(sandbox.id).catch((error: unknown) => {
+          console.warn("Hosted server sandbox delete failed.", {
+            serverId: row.server_id,
+            error: safeErrorCode(error),
+          });
+        });
+        return;
+      }
+      this.#track(row, { name: "hosted_server_action", action: "provisioned", plan: row.plan, size: row.size });
+      await this.#rename(row, sandbox.id);
     } catch (error) {
       console.warn("Hosted server provisioning failed.", { serverId: row.server_id, error: safeErrorCode(error) });
+      const failed = providerError(error);
+      // Only the setup that is still running: a delete or the end of the plan keeps its own state.
       await this.#database
         .prepare(
           `UPDATE hosted_servers SET observed_state = 'error', observed_error = ?, claim_token_hash = NULL, updated_at = ?
-           WHERE server_id = ?`,
+           WHERE server_id = ? AND observed_state = 'creating' AND provider_sandbox_id IS NULL`,
         )
-        .bind(providerError(error), this.#now(), row.server_id)
+        .bind(failed, this.#now(), row.server_id)
         .run();
+      this.#track(row, { name: "hosted_server_action", action: "setup_failed", plan: row.plan, error: failed });
     }
+  }
+
+  /**
+   * Gives the sandbox a name that an operator can find in the boat dashboard: the plan, the owner's
+   * email and the start of the server ID. The name is not an address. A failure keeps the old name.
+   */
+  async #rename(row: HostedServerRow, sandboxId: string): Promise<void> {
+    const boat = this.#boat;
+    if (!boat) return;
+    try {
+      const owner = await this.#database
+        .prepare("SELECT email FROM users WHERE id = ?")
+        .bind(row.owner_user_id)
+        .first<{ email: string }>();
+      if (!owner) return;
+      await boat.renameSandbox(sandboxId, sandboxName(row.plan, owner.email, row.server_id));
+    } catch (error) {
+      console.warn("Hosted server rename failed.", { serverId: row.server_id, error: safeErrorCode(error) });
+    }
+  }
+
+  /** Removes a server whose first payment never came. A Checkout paid at the last minute keeps it. */
+  async #removeUnpaid(row: HostedServerRow, now: number): Promise<boolean> {
+    if (row.checkout_session_id && (await this.#billing?.closeCheckout(row.checkout_session_id)) === "paid") {
+      return false;
+    }
+    const removed = await this.#database
+      .prepare(
+        `UPDATE hosted_servers SET desired_state = 'deleted', observed_state = 'deleted', checkout_session_id = NULL,
+           deleted_at = ?, updated_at = ?
+         WHERE server_id = ? AND observed_state = 'awaiting_payment' AND desired_state = 'running'
+           AND checkout_session_id IS ?`,
+      )
+      .bind(now, now, row.server_id, row.checkout_session_id)
+      .run();
+    return removed.meta.changes === 1;
+  }
+
+  /** Reads the real state of the sandbox from the provider. A sandbox that boat does not have is gone. */
+  async #refresh(row: HostedServerRow): Promise<void> {
+    const boat = this.#boat;
+    const sandboxId = row.provider_sandbox_id;
+    if (!boat || !sandboxId) return;
+    const state = await boat.getSandbox(sandboxId).then(
+      (sandbox) => sandbox.state,
+      (error: unknown) => {
+        if (error instanceof BoatApiError && error.status === 404) return "cancelled" as const;
+        throw error;
+      },
+    );
+    await this.#observe(row, state, this.#now());
   }
 
   /**
@@ -813,7 +901,9 @@ export class HostedServerService {
         )
         .bind(this.#now(), row.server_id)
         .run();
-      if (reset.meta.changes === 1) await this.#provision(await this.#requireRow(row.server_id));
+      if (reset.meta.changes !== 1) return;
+      this.#track(row, { name: "hosted_server_action", action: "renewed", plan: row.plan, size: row.size });
+      await this.#provision(await this.#requireRow(row.server_id));
       return;
     }
     const renewed = await this.#database
@@ -825,6 +915,7 @@ export class HostedServerService {
       .bind(this.#now(), row.server_id)
       .run();
     if (renewed.meta.changes !== 1) return;
+    this.#track(row, { name: "hosted_server_action", action: "renewed", plan: row.plan, size: row.size });
     // A server that still stops starts again when the provider reports that it stopped.
     await this.#wake(await this.#requireRow(row.server_id), "restart");
   }
@@ -840,6 +931,7 @@ export class HostedServerService {
       .bind(this.#now(), row.server_id)
       .run();
     if (ended.meta.changes !== 1) return;
+    this.#track(row, { name: "hosted_server_action", action: "plan_stopped", plan: row.plan, size: row.size });
     try {
       await this.#stop(await this.#requireRow(row.server_id));
     } catch (error) {
@@ -857,8 +949,9 @@ export class HostedServerService {
     try {
       await boat.stopSandbox(row.provider_sandbox_id);
     } catch (error) {
-      // 409: the sandbox cannot stop in its current state. The cron tries again.
-      if (error instanceof BoatApiError && error.status === 409) return;
+      // 409: the sandbox cannot stop in its current state. A lost event can hide that it is stopped
+      // already, so the provider is asked. Else the cron tries again.
+      if (error instanceof BoatApiError && error.status === 409) return this.#refresh(row);
       throw error;
     }
     await this.#database
@@ -880,7 +973,9 @@ export class HostedServerService {
       )
       .bind(this.#now(), row.server_id, now - IDLE_STOP_AFTER_MS)
       .run();
-    if (idle.meta.changes === 1) await this.#stop({ ...row, desired_state: "idle" });
+    if (idle.meta.changes !== 1) return;
+    this.#track(row, { name: "hosted_server_action", action: "idle_stopped", plan: row.plan, size: row.size });
+    await this.#stop({ ...row, desired_state: "idle" });
   }
 
   /** Moves the boat stop time of a server in use, so boat does not stop it. */
@@ -947,7 +1042,11 @@ export class HostedServerService {
       )
       .bind(reason, now, now, now + LEASE_TTL_SECONDS * 1000, now, row.server_id, row.observed_state)
       .run();
-    if (waking.meta.changes === 1) await this.#resume(row);
+    if (waking.meta.changes !== 1) return;
+    if (reason !== "create") {
+      this.#track(row, { name: "hosted_server_action", action: "woken", plan: row.plan, size: row.size, reason });
+    }
+    await this.#resume(row);
   }
 
   async #resume(row: HostedServerRow): Promise<void> {
@@ -969,8 +1068,15 @@ export class HostedServerService {
           .run();
         return this.#resume({ ...row, pending_size: null });
       }
-      // 409: the provider already resumes or runs it; the webhook or the cron reports the result.
-      if (error instanceof BoatApiError && error.status === 409) return;
+      // 409: the provider already resumes or runs it; the webhook or the cron reports the result. boat
+      // kept its old stop time, so the next activity sets a new one.
+      if (error instanceof BoatApiError && error.status === 409) {
+        await this.#database
+          .prepare("UPDATE hosted_servers SET lease_until = NULL WHERE server_id = ?")
+          .bind(row.server_id)
+          .run();
+        return;
+      }
       await this.#database
         .prepare(
           `UPDATE hosted_servers SET observed_state = 'error', observed_error = ?, updated_at = ?
@@ -987,6 +1093,7 @@ export class HostedServerService {
         )
         .bind(size, this.#now(), row.server_id, size)
         .run();
+      this.#track(row, { name: "hosted_server_action", action: "resized", plan: row.plan, size });
     }
   }
 
@@ -1005,7 +1112,7 @@ export class HostedServerService {
       observed = "stopped";
     } else if (state === "error" || state === "cancelled") {
       observed = "error";
-      error = "provider_error";
+      error = row.desired_state === "stopped" ? "plan_ended" : "provider_error";
     } else if (row.observed_state === "creating") {
       observed = "starting";
     }
@@ -1023,6 +1130,8 @@ export class HostedServerService {
   }
 
   async #finishDelete(row: HostedServerRow): Promise<void> {
+    // A create call runs and can still return a sandbox. The cron deletes it after the call ends.
+    if (row.observed_state === "creating" && !row.provider_sandbox_id) return;
     if (row.provider_sandbox_id) {
       if (!this.#boat) throw new HostedServerServiceError(503, "hosting_not_configured", "Hosting is not configured.");
       try {
@@ -1050,6 +1159,10 @@ export class HostedServerService {
         .prepare("UPDATE auth_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL")
         .bind(now, row.auth_session_id),
     ]);
+  }
+
+  #track(row: HostedServerRow, event: AccountAnalyticsEvent): void {
+    this.#analytics.track(row.owner_user_id, event);
   }
 
   #requireAvailable(userId: string): { billing: HostedServerBilling } {
@@ -1086,6 +1199,21 @@ function summary(row: HostedServerRow): HostedServerSummary {
     createdAt: new Date(row.created_at).toISOString(),
     updatedAt: new Date(row.updated_at).toISOString(),
   };
+}
+
+/** `openbot-{plan}-{email}-{first 8 characters of the server ID}`, in the characters of a boat name. */
+export function sandboxName(plan: BillingPlanId, email: string, serverId: string): string {
+  const slug = (value: string) =>
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/gu, "-")
+      .replace(/^-+|-+$/gu, "");
+  const prefix = `openbot-${plan}-`;
+  const suffix = `-${slug(serverId).slice(0, 8)}`;
+  const owner = slug(email)
+    .slice(0, SANDBOX_NAME_MAX_LENGTH - prefix.length - suffix.length)
+    .replace(/-+$/u, "");
+  return `${prefix}${owner || "account"}${suffix}`;
 }
 
 function isUsable(state: BoatSandboxState): boolean {

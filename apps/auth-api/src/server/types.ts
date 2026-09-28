@@ -40,6 +40,8 @@ export interface WorkerBindings {
   HOSTED_SERVER_TEMPLATE?: string;
   BOAT_API_KEY?: string;
   BOAT_WEBHOOK_SECRET?: string;
+  /** The write-only OpenPanel Client Secret for account events. Set only in production. */
+  OPENPANEL_CLIENT_SECRET?: string;
 }
 
 function isWorkerBindings(value: unknown): value is WorkerBindings {

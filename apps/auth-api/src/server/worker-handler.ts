@@ -92,7 +92,8 @@ type HostedServerTickBindingKey =
   | "REMOTE_TICKET_PUBLIC_JWKS"
   | "REMOTE_TICKET_KEY_ID"
   | "STRIPE_SECRET_KEY"
-  | "STRIPE_WEBHOOK_SECRET";
+  | "STRIPE_WEBHOOK_SECRET"
+  | "OPENPANEL_CLIENT_SECRET";
 
 function tickHostedServers(
   bindings: Pick<WorkerBindings, "DB" | "REMOTE_AUTH_WEBHOOK_URL" | "REMOTE_AUTH_WEBHOOK_SECRET"> &
@@ -100,11 +101,18 @@ function tickHostedServers(
   now: number,
 ) {
   const remote = new RemoteControlPlane(bindings);
+  // The cron waits for the analytics sends itself. They never reject.
+  const sends: Promise<void>[] = [];
   return createHostedBilling(bindings, {
     removeHost: (ownerUserId, hostId) => remote.deleteHost(ownerUserId, hostId),
     planChanged: (hostId) => remote.planChanged(hostId),
+    schedule: (send) => sends.push(send),
   })
     .hosting.tick(now)
+    .then(async (result) => {
+      await Promise.all(sends);
+      return result;
+    })
     .catch(() => {
       // The next minute checks again. The error can hold SQL or provider detail, so it is not logged.
       console.warn("Hosted server check failed.");

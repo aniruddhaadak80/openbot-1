@@ -116,6 +116,11 @@ export class BoatClient {
     await this.#request("PATCH", `/sandboxes/${encodeURIComponent(sandboxId)}`, { body: { ttlSeconds } });
   }
 
+  /** Sets the name that the boat dashboard shows. It is not an address and does not need to be unique. */
+  async renameSandbox(sandboxId: string, name: string): Promise<void> {
+    await this.#request("PATCH", `/sandboxes/${encodeURIComponent(sandboxId)}`, { body: { name } });
+  }
+
   /**
    * Stops and archives the sandbox. boat saves the disk first and keeps the sandbox for a resume. When
    * that save fails, boat refuses the stop and the sandbox keeps running. This never forces a stop.

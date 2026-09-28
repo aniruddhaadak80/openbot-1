@@ -9,10 +9,11 @@ import {
 import { isDynamicRecord, isString } from "@openbot/contracts/runtime-values";
 import { exportJWK, generateKeyPair } from "jose";
 import { afterEach, describe, expect, it } from "vitest";
+import { type AccountAnalyticsEvent, accountEventProperties } from "../src/server/account-analytics";
 import { BillingService } from "../src/server/billing-service";
 import { sha256 } from "../src/server/crypto";
 import { D1AuthRepository } from "../src/server/d1-auth-repository";
-import { HostedServerService } from "../src/server/hosted-server-service";
+import { HostedServerService, sandboxName } from "../src/server/hosted-server-service";
 import { RemoteControlPlane } from "../src/server/remote-control-plane";
 import { migratedDatabase, sqliteD1 } from "./sqlite-d1";
 
@@ -94,6 +95,8 @@ async function setup() {
     BOAT_WEBHOOK_SECRET: BOAT_WEBHOOK_SECRET,
   };
   const stripe = new FakeStripe();
+  const events: { accountId: string; event: AccountAnalyticsEvent }[] = [];
+  const analytics = { track: (accountId: string, event: AccountAnalyticsEvent) => events.push({ accountId, event }) };
   const remote = new RemoteControlPlane(bindings, { now: () => clock.now, fetch: async () => new Response(null) });
   const billing = new BillingService({
     database: bindings.DB,
@@ -103,12 +106,14 @@ async function setup() {
     fetch: (input, init) => stripe.fetch(input, init),
     now: () => clock.now,
     onSubscriptionSynced: (sync) => service.onSubscriptionSynced(sync),
+    analytics,
   });
   const service = new HostedServerService(bindings, {
     fetch: boatFetch,
     now: () => clock.now,
     removeHost: (ownerUserId, hostId) => remote.deleteHost(ownerUserId, hostId),
     billing,
+    analytics,
   });
   let delivery = 0;
   const boatWebhook = (
@@ -169,6 +174,7 @@ async function setup() {
     stripeSync,
     state,
     sandboxCreates,
+    events,
   };
 }
 
@@ -360,6 +366,9 @@ describe("hosted servers", () => {
     const context = await setup();
     const paid = await context.service.create(owner, STARTER, "create-key-0000001", RETURN);
     const unpaid = await context.service.create(owner, STARTER, "create-key-0000002", RETURN);
+    // Paid at the last minute: the Stripe webhook has not come yet.
+    const paidLate = await context.service.create(owner, STARTER, "create-key-0000003", RETURN);
+    context.stripe.sessions.set("cs_3", "complete");
     // The webhook stored the subscription, but the hosting step failed.
     context.database
       .prepare(
@@ -386,10 +395,76 @@ describe("hosted servers", () => {
       desired_state: "deleted",
       observed_state: "deleted",
     });
+    expect(context.state(paidLate.server.serverId)).toMatchObject({
+      desired_state: "running",
+      observed_state: "awaiting_payment",
+    });
     // A server with a plan that ended keeps its data.
     await expect(context.service.list(owner)).resolves.toMatchObject({
-      servers: [{ serverId: paid.server.serverId, state: "stopping" }],
+      servers: [
+        { serverId: paid.server.serverId, state: "stopping" },
+        { serverId: paidLate.server.serverId, state: "awaiting_payment" },
+      ],
     });
+  });
+
+  it("recovers a setup that stopped before boat answered, and finishes a delete that came during it", async () => {
+    const context = await setup();
+    const lost = await context.service.create(owner, STARTER, "create-key-0000001", RETURN);
+    const deleted = await context.service.create(owner, STARTER, "create-key-0000002", RETURN);
+    context.database
+      .prepare(
+        `INSERT INTO billing_subscriptions(
+           stripe_subscription_id, user_id, stripe_customer_id, server_id, plan, interval, currency, status,
+           current_period_end, cancel_at_period_end, updated_at
+         ) VALUES ('sub_1', 'owner', 'cus_1', ?, 'starter', 'month', 'eur', 'active', ?, 0, 1)`,
+      )
+      .run(lost.server.serverId, context.clock.now + 30 * 24 * 60 * MINUTE);
+    // The Worker stopped after the claim and before boat answered.
+    context.database.exec("UPDATE hosted_servers SET observed_state = 'creating', checkout_session_id = NULL");
+
+    // A delete does not wait for the create, and does not forget a sandbox that it can still return.
+    await context.service.delete(owner, deleted.server.serverId, "Cloud one");
+    expect(context.state(deleted.server.serverId)).toMatchObject({
+      desired_state: "deleted",
+      observed_state: "creating",
+    });
+
+    context.clock.now += 10 * MINUTE;
+    await context.service.tick();
+    expect(context.state(lost.server.serverId)).toMatchObject({
+      observed_state: "error",
+      observed_error: "provider_error",
+    });
+    expect(context.state(deleted.server.serverId)).toMatchObject({ observed_state: "deleted" });
+    context.clock.now += 11 * MINUTE;
+    await expect(context.service.tick()).resolves.toMatchObject({ provisioned: 1 });
+    expect(context.sandboxCreates()).toHaveLength(1);
+    expect(context.state(lost.server.serverId)).toMatchObject({ observed_state: "starting", observed_error: null });
+  });
+
+  it("sends account events with only allowlisted values, and no email or server ID", async () => {
+    const context = await setup();
+    const server = await createRunningServer(context);
+    await context.service.delete(owner, server.serverId, "Cloud one");
+    expect(context.events.map(({ accountId, event }) => [accountId, event.name, event.action])).toEqual([
+      ["owner", "billing_action", "checkout_started"],
+      ["owner", "billing_action", "plan_started"],
+      ["owner", "hosted_server_action", "provisioned"],
+      ["owner", "billing_action", "plan_ended"],
+      ["owner", "hosted_server_action", "deleted"],
+    ]);
+    const sent = JSON.stringify(context.events.map(({ event }) => accountEventProperties(event)));
+    expect(sent).not.toContain(owner.email);
+    expect(sent).not.toContain(server.serverId);
+    expect(sent).not.toContain("cus_1");
+    expect(sent).not.toContain("sub_1");
+    // A value from outside the allowlist is dropped, and an unknown event is not sent.
+    const untrusted: AccountAnalyticsEvent = JSON.parse(
+      `{"name":"billing_action","action":"plan_changed","plan":"${owner.email}","flow":"${server.serverId}"}`,
+    );
+    expect(JSON.stringify(accountEventProperties(untrusted))).not.toContain("example");
+    expect(accountEventProperties(JSON.parse(`{"name":"billing_action","action":"${owner.email}"}`))).toBeNull();
   });
 
   it("sets up a paid server again after its setup failed, and only while the plan is open", async () => {
@@ -593,6 +668,15 @@ describe("hosted servers", () => {
       )
       .run(await sha256(ownerToken), context.clock.now + 60 * MINUTE);
     const calls = (path: string) => context.boatCalls.filter((call) => call.path === path);
+    const leases = () =>
+      calls("/sandboxes/bx_1").filter((call) => isDynamicRecord(call.body) && "ttlSeconds" in call.body);
+    // The display name tells the operator the plan and the owner. It is deterministic.
+    expect(calls("/sandboxes/bx_1").map((call) => [call.method, call.body])).toEqual([
+      ["PATCH", { name: sandboxName("starter", owner.email, server.serverId) }],
+    ]);
+    expect(sandboxName("starter", owner.email, server.serverId)).toBe(
+      `openbot-starter-owner-example-test-${server.serverId.slice(0, 8)}`,
+    );
 
     // Only the session of the server can keep it running.
     await expect(context.service.reportActivity(ownerToken, server.serverId)).rejects.toMatchObject({ status: 404 });
@@ -601,16 +685,14 @@ describe("hosted servers", () => {
     context.clock.now += 14 * MINUTE;
     await context.service.tick(context.clock.now);
     expect(context.state(server.serverId)).toMatchObject({ desired_state: "running", observed_state: "running" });
-    expect(calls("/sandboxes/bx_1")).toHaveLength(0);
+    expect(leases()).toHaveLength(0);
 
     // Use near the end of the boat lease moves the lease.
     context.clock.now += 33 * MINUTE;
     await context.service.reportActivity(sessionToken, server.serverId);
-    expect(calls("/sandboxes/bx_1").map((call) => [call.method, call.body])).toEqual([
-      ["PATCH", { ttlSeconds: LEASE }],
-    ]);
+    expect(leases().map((call) => [call.method, call.body])).toEqual([["PATCH", { ttlSeconds: LEASE }]]);
     await context.service.reportActivity(sessionToken, server.serverId);
-    expect(calls("/sandboxes/bx_1")).toHaveLength(1);
+    expect(leases()).toHaveLength(1);
 
     context.clock.now += 15 * MINUTE;
     await context.service.tick(context.clock.now);

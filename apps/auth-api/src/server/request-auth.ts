@@ -176,6 +176,7 @@ function requestHostedBilling() {
   return createHostedBilling(bindings, {
     removeHost: (ownerUserId, hostId) => remote.deleteHost(ownerUserId, hostId),
     planChanged: (hostId) => remote.planChanged(hostId),
+    schedule: waitUntil,
   });
 }
 

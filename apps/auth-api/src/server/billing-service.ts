@@ -14,10 +14,12 @@ import {
   type BillingSubscriptionStatus,
   billingLookupKey,
   isBillingAmount,
+  isOpenBillingStatus,
   parseBillingLookupKey,
 } from "@openbot/contracts/billing";
 import type { HostedServerCatalog, HostedServerCatalogPlan } from "@openbot/contracts/hosted-servers";
 import { isDynamicRecord, isOneOf, isString } from "@openbot/contracts/runtime-values";
+import { type AccountAnalytics, type BillingAction, NO_ACCOUNT_ANALYTICS } from "./account-analytics";
 import {
   isBillingCurrency,
   parseStripeEvent,
@@ -93,6 +95,23 @@ export interface BillingServiceOptions {
    * billing does not know about the provider. An error makes Stripe send the event again.
    */
   onSubscriptionSynced?: (sync: SubscriptionSync) => Promise<void>;
+  analytics?: AccountAnalytics;
+}
+
+/** The stored state of a subscription before a sync, to find the change that the sync made. */
+interface StoredSubscription {
+  status: string;
+  plan: string;
+  interval: string;
+  cancel_at_period_end: number;
+}
+
+/** A subscription that a webhook stored, with its account. */
+interface SyncedSubscription {
+  userId: string;
+  plan: BillingPlanId;
+  interval: BillingInterval;
+  currency: BillingCurrency;
 }
 
 export interface CheckoutRequest {
@@ -112,6 +131,7 @@ export class BillingService {
   readonly #webhookSecret: string | null;
   readonly #now: () => number;
   readonly #onSubscriptionSynced: ((sync: SubscriptionSync) => Promise<void>) | null;
+  readonly #analytics: AccountAnalytics;
 
   constructor(options: BillingServiceOptions) {
     this.#database = options.database;
@@ -120,6 +140,7 @@ export class BillingService {
     this.#webhookSecret = options.webhookSecret;
     this.#now = options.now ?? Date.now;
     this.#onSubscriptionSynced = options.onSubscriptionSynced ?? null;
+    this.#analytics = options.analytics ?? NO_ACCOUNT_ANALYTICS;
   }
 
   /** The plans with their Stripe prices. A plan with no price in each currency and interval is left out. */
@@ -184,7 +205,8 @@ export class BillingService {
   /** A Stripe Checkout page that starts the plan of one server. */
   async createCheckout(request: CheckoutRequest): Promise<{ sessionId: string; url: string }> {
     const price = (await this.#prices()).get(billingLookupKey(request.plan, request.interval));
-    if (!price || priceAmount(price, request.currency) === null) throw plansUnavailable();
+    const amount = priceAmount(price, request.currency);
+    if (!price || amount === null) throw plansUnavailable();
     const customerId = await this.ensureCustomer(request.user);
     const returnUrl = checkoutReturnUrl(request.origin, request.target, request.serverId);
     const session = await this.#stripeCall(() =>
@@ -199,6 +221,14 @@ export class BillingService {
         nowSeconds: Math.floor(this.#now() / 1_000),
       }),
     );
+    this.#analytics.track(request.user.id, {
+      name: "billing_action",
+      action: "checkout_started",
+      plan: request.plan,
+      interval: request.interval,
+      currency: request.currency,
+      amount,
+    });
     return { sessionId: session.id, url: session.url };
   }
 
@@ -225,6 +255,20 @@ export class BillingService {
 
   /** Cancels one subscription now. A subscription that Stripe closed already counts as cancelled. */
   async cancelSubscription(subscriptionId: string): Promise<void> {
+    const stored = await this.#database
+      .prepare(
+        `SELECT user_id, plan, interval, currency, amount, status FROM billing_subscriptions
+         WHERE stripe_subscription_id = ?`,
+      )
+      .bind(subscriptionId)
+      .first<{
+        user_id: string;
+        plan: string;
+        interval: string;
+        currency: string;
+        amount: number | null;
+        status: string;
+      }>();
     await this.#stripeCall(async () => {
       try {
         await this.#stripe.cancelSubscription(subscriptionId);
@@ -242,6 +286,17 @@ export class BillingService {
       )
       .bind(this.#now(), subscriptionId)
       .run();
+    // The webhook that follows sees the plan closed already, so the end is reported here.
+    if (stored && isOneOf(BILLING_SUBSCRIPTION_STATUSES, stored.status) && isOpenBillingStatus(stored.status)) {
+      this.#analytics.track(stored.user_id, {
+        name: "billing_action",
+        action: "plan_ended",
+        plan: isOneOf(BILLING_PLAN_IDS, stored.plan) ? stored.plan : undefined,
+        interval: isOneOf(BILLING_INTERVALS, stored.interval) ? stored.interval : undefined,
+        currency: isBillingCurrency(stored.currency) ? stored.currency : undefined,
+        amount: stored.amount,
+      });
+    }
   }
 
   /** The open plan of each server. The server name comes only from a host that the same account owns. */
@@ -280,6 +335,7 @@ export class BillingService {
     const customerId = await this.#customerId(userId);
     if (!customerId) throw new BillingError(404, "no_customer", "No billing account exists yet.");
     const returnUrl = portalReturnUrl(origin, target);
+    this.#analytics.track(userId, { name: "billing_action", action: "portal_opened", flow: request.flow });
     if (request.flow === "manage") {
       return this.#stripeCall(() => this.#stripe.createPortalSession({ customerId, returnUrl }));
     }
@@ -319,7 +375,7 @@ export class BillingService {
       .first<{ seen: number }>();
     if (seen) return;
     const subscriptionId = eventSubscriptionId(event);
-    if (subscriptionId) await this.#syncSubscription(subscriptionId);
+    const synced = subscriptionId ? await this.#syncSubscription(subscriptionId) : null;
     // The event is recorded only after it is applied, so a failed event is applied again on retry.
     await this.#database.batch([
       this.#database
@@ -329,22 +385,59 @@ export class BillingService {
         .prepare("DELETE FROM billing_webhook_events WHERE received_at < ?")
         .bind(now - WEBHOOK_EVENT_RETENTION_MS),
     ]);
+    await this.#trackEvent(event, synced);
   }
 
-  async #syncSubscription(subscriptionId: string): Promise<void> {
+  /** Reports a payment or an expired Checkout. A change of the plan itself is reported by the sync. */
+  async #trackEvent(event: StripeEvent, synced: SyncedSubscription | null): Promise<void> {
+    const object = event.data.object;
+    if (event.type === "checkout.session.expired") {
+      const userId = isDynamicRecord(object.metadata) ? object.metadata[BILLING_METADATA.userId] : null;
+      const user = isString(userId)
+        ? await this.#database.prepare("SELECT id FROM users WHERE id = ?").bind(userId).first<{ id: string }>()
+        : null;
+      if (user) this.#analytics.track(user.id, { name: "billing_action", action: "checkout_expired" });
+      return;
+    }
+    if (!synced || (event.type !== "invoice.paid" && event.type !== "invoice.payment_failed")) return;
+    const paid = event.type === "invoice.paid";
+    const amount = paid ? object.amount_paid : object.amount_due;
+    const currency = isString(object.currency) ? object.currency.toLowerCase() : null;
+    this.#analytics.track(synced.userId, {
+      name: "billing_action",
+      action: paid ? "payment_succeeded" : "payment_failed",
+      plan: synced.plan,
+      interval: synced.interval,
+      currency: synced.currency,
+      amount: currency === synced.currency && isBillingAmount(amount) ? amount : null,
+    });
+  }
+
+  async #syncSubscription(subscriptionId: string): Promise<SyncedSubscription | null> {
+    // The time of the read, not of the write: a read that started later holds the newer state.
+    const readAt = this.#now();
     const subscription = await this.#stripeCall(() => this.#stripe.getSubscription(subscriptionId));
     const customerId = subscriptionCustomerId(subscription);
     const key = parseBillingLookupKey(subscription.items.data[0]?.price.lookup_key);
     const currency = subscription.currency.toLowerCase();
     if (!key || !isBillingCurrency(currency) || !isOneOf(BILLING_SUBSCRIPTION_STATUSES, subscription.status)) {
       console.warn("billing: subscription is not an OpenBot plan", { subscriptionId });
-      return;
+      return null;
     }
     const ownerId = await this.#subscriptionOwner(subscription, customerId);
-    if (!ownerId) return;
+    if (!ownerId) return null;
     const metadataServerId = subscription.metadata[BILLING_METADATA.serverId];
     const serverId = metadataServerId && SERVER_ID_PATTERN.test(metadataServerId) ? metadataServerId : null;
-    await this.#database
+    const previous = await this.#database
+      .prepare(
+        "SELECT status, plan, interval, cancel_at_period_end FROM billing_subscriptions WHERE stripe_subscription_id = ?",
+      )
+      .bind(subscription.id)
+      .first<StoredSubscription>();
+    const cancelAtPeriodEnd = subscription.cancel_at_period_end || typeof subscription.cancel_at === "number";
+    const amount = subscriptionAmount(subscription);
+    // Two events for one subscription can run at the same time. The write of the older read is skipped.
+    const stored = await this.#database
       .prepare(
         `INSERT INTO billing_subscriptions(
            stripe_subscription_id, user_id, stripe_customer_id, server_id, plan, interval, currency, amount,
@@ -359,7 +452,8 @@ export class BillingService {
            status = excluded.status,
            current_period_end = excluded.current_period_end,
            cancel_at_period_end = excluded.cancel_at_period_end,
-           updated_at = excluded.updated_at`,
+           updated_at = excluded.updated_at
+         WHERE excluded.updated_at >= billing_subscriptions.updated_at`,
       )
       .bind(
         subscription.id,
@@ -369,13 +463,16 @@ export class BillingService {
         key.plan,
         key.interval,
         currency,
-        subscriptionAmount(subscription),
+        amount,
         subscription.status,
         subscriptionPeriodEnd(subscription),
-        subscription.cancel_at_period_end || typeof subscription.cancel_at === "number" ? 1 : 0,
-        this.#now(),
+        cancelAtPeriodEnd ? 1 : 0,
+        readAt,
       )
       .run();
+    const synced: SyncedSubscription = { userId: ownerId, plan: key.plan, interval: key.interval, currency };
+    if (stored.meta.changes !== 1) return synced;
+    this.#trackChange(previous, { ...synced, amount, status: subscription.status, cancelAtPeriodEnd });
     if (serverId && this.#onSubscriptionSynced) {
       await this.#onSubscriptionSynced({
         subscriptionId,
@@ -387,6 +484,28 @@ export class BillingService {
         currency,
       });
     }
+    return synced;
+  }
+
+  /** Reports the change of a plan that one sync made. A sync that changes nothing reports nothing. */
+  #trackChange(
+    previous: StoredSubscription | null,
+    current: SyncedSubscription & {
+      amount: number | null;
+      status: BillingSubscriptionStatus;
+      cancelAtPeriodEnd: boolean;
+    },
+  ): void {
+    const action = planChange(previous, current);
+    if (!action) return;
+    this.#analytics.track(current.userId, {
+      name: "billing_action",
+      action,
+      plan: current.plan,
+      interval: current.interval,
+      currency: current.currency,
+      amount: current.amount,
+    });
   }
 
   async #prices(): Promise<ReadonlyMap<string, StripePrice>> {
@@ -462,6 +581,28 @@ export class BillingService {
       );
     }
   }
+}
+
+function planChange(
+  previous: StoredSubscription | null,
+  current: {
+    plan: BillingPlanId;
+    interval: BillingInterval;
+    status: BillingSubscriptionStatus;
+    cancelAtPeriodEnd: boolean;
+  },
+): BillingAction | null {
+  const wasOpen =
+    previous !== null &&
+    isOneOf(BILLING_SUBSCRIPTION_STATUSES, previous.status) &&
+    isOpenBillingStatus(previous.status);
+  const isOpen = isOpenBillingStatus(current.status);
+  if (!previous || !wasOpen) return isOpen ? "plan_started" : null;
+  if (!isOpen) return "plan_ended";
+  if (previous.plan !== current.plan || previous.interval !== current.interval) return "plan_changed";
+  const wasCancelling = previous.cancel_at_period_end === 1;
+  if (wasCancelling === current.cancelAtPeriodEnd) return null;
+  return current.cancelAtPeriodEnd ? "cancel_scheduled" : "cancel_withdrawn";
 }
 
 function serverPlan(row: ServerPlanRow): BillingServerPlan | null {
