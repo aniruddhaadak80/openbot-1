@@ -35,7 +35,7 @@ export class BillingDesktopService {
   }
 }
 
-export function decodeBillingState(value: unknown): BillingState {
+function decodeBillingState(value: unknown): BillingState {
   const state = parseBillingState(value);
   if (!state) throw new Error(sourceText("error.billing.invalidResponse"));
   return state;
