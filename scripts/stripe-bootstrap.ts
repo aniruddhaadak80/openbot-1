@@ -13,16 +13,25 @@ import { z } from "zod";
  * for each plan and interval with the lookup key `openbot_{plan}_{interval}`. It also sets the
  * Customer Portal features. Run it again at any time: it changes only what differs.
  *
- *   STRIPE_SECRET_KEY=sk_test_... bun scripts/stripe-bootstrap.ts [--live]
+ *   STRIPE_SECRET_KEY=sk_test_... bun scripts/stripe-bootstrap.ts [--live] [--webhook-url <url>]
  *
- * Without `--live` it refuses a live key.
+ * Without `--live` it refuses a live key. `--webhook-url` creates or updates the webhook endpoint at
+ * that URL. Stripe shows the signing secret of an endpoint only when it creates the endpoint, so the
+ * script prints it one time, for STRIPE_WEBHOOK_SECRET.
  */
 
 const logger = createOpenBotLogger("stripe-bootstrap");
 const STRIPE_API_VERSION = "2025-03-31.basil";
 
-/** Monthly amounts in EUR cents. USD uses the same numbers. PLN is EUR ×4. A year costs 12 months less 20%. */
-const MONTHLY_EUR_CENTS: Record<BillingPlanId, number> = { starter: 2000, standard: 5000, pro: 10000 };
+/**
+ * Monthly amounts in the minor unit (cents, grosze). Each amount divides by 5, so a year (12 months
+ * less 20%) is a whole number.
+ */
+const MONTHLY_CENTS: Record<BillingPlanId, PriceAmounts> = {
+  starter: { eur: 2000, usd: 2500, pln: 9000 },
+  standard: { eur: 5000, usd: 6000, pln: 22000 },
+  pro: { eur: 10000, usd: 12000, pln: 44000 },
+};
 const PLAN_NAME: Record<BillingPlanId, string> = { starter: "Starter", standard: "Standard", pro: "Pro" };
 
 /** The events that the webhook endpoint must receive. */
@@ -35,6 +44,7 @@ export const BILLING_WEBHOOK_EVENTS = [
   "customer.subscription.resumed",
   "invoice.paid",
   "invoice.payment_failed",
+  "checkout.session.expired",
 ] as const;
 
 export interface PriceAmounts {
@@ -44,8 +54,10 @@ export interface PriceAmounts {
 }
 
 export function billingPriceAmounts(plan: BillingPlanId, interval: BillingInterval): PriceAmounts {
-  const eur = interval === "month" ? MONTHLY_EUR_CENTS[plan] : Math.round(MONTHLY_EUR_CENTS[plan] * 12 * 0.8);
-  return { eur, usd: eur, pln: eur * 4 };
+  const monthly = MONTHLY_CENTS[plan];
+  if (interval === "month") return monthly;
+  const year = (amount: number) => (amount * 12 * 4) / 5;
+  return { eur: year(monthly.eur), usd: year(monthly.usd), pln: year(monthly.pln) };
 }
 
 const productSchema = z.object({ id: z.string(), active: z.boolean() });
@@ -61,6 +73,8 @@ const priceSchema = z.object({
 type Price = z.infer<typeof priceSchema>;
 const priceListSchema = z.object({ data: z.array(priceSchema) });
 const portalConfigurationListSchema = z.object({ data: z.array(z.object({ id: z.string() })) });
+const webhookEndpointSchema = z.object({ id: z.string(), url: z.string(), secret: z.string().optional() });
+const webhookEndpointListSchema = z.object({ data: z.array(webhookEndpointSchema), has_more: z.boolean() });
 
 class StripeAdmin {
   constructor(private readonly secretKey: string) {}
@@ -208,6 +222,43 @@ async function updatePortalConfiguration(
   return true;
 }
 
+/** Returns the signing secret when this call created the endpoint, and null when it updated one. */
+async function ensureWebhookEndpoint(stripe: StripeAdmin, url: string): Promise<string | null> {
+  const parsed = new URL(url);
+  if (parsed.protocol !== "https:" || !parsed.pathname.endsWith("/v1/stripe/webhook")) {
+    throw new Error("--webhook-url must be an https URL that ends with /v1/stripe/webhook.");
+  }
+  const body = new URLSearchParams({ url: parsed.href, description: "OpenBot account server" });
+  for (const event of BILLING_WEBHOOK_EVENTS) body.append("enabled_events[]", event);
+  let startingAfter: string | null = null;
+  for (;;) {
+    const query = new URLSearchParams({ limit: "100", ...(startingAfter ? { starting_after: startingAfter } : {}) });
+    const page = await stripe.request("GET", `/v1/webhook_endpoints?${query}`, null, webhookEndpointListSchema);
+    const current = page.data.find((endpoint) => endpoint.url === parsed.href);
+    if (current) {
+      await stripe.request("POST", `/v1/webhook_endpoints/${current.id}`, body, webhookEndpointSchema);
+      logger.info(`Webhook endpoint ${current.id} is up to date. Its signing secret did not change.`);
+      return null;
+    }
+    const last = page.data.at(-1);
+    if (!page.has_more || !last) break;
+    startingAfter = last.id;
+  }
+  body.set("api_version", STRIPE_API_VERSION);
+  const created = await stripe.request("POST", "/v1/webhook_endpoints", body, webhookEndpointSchema);
+  logger.info(`Created webhook endpoint ${created.id}.`);
+  if (!created.secret) throw new Error("Stripe did not return the signing secret of the new webhook endpoint.");
+  return created.secret;
+}
+
+function optionValue(args: readonly string[], name: string): string | null {
+  const index = args.indexOf(name);
+  if (index === -1) return null;
+  const value = args[index + 1];
+  if (!value || value.startsWith("--")) throw new Error(`${name} needs a value.`);
+  return value;
+}
+
 async function main(args: readonly string[]): Promise<void> {
   const secretKey = process.env.STRIPE_SECRET_KEY?.trim();
   if (!secretKey) throw new Error("Set STRIPE_SECRET_KEY to a Stripe secret key.");
@@ -215,6 +266,7 @@ async function main(args: readonly string[]): Promise<void> {
   if (!live && !/^(sk|rk)_test_/u.test(secretKey)) {
     throw new Error("STRIPE_SECRET_KEY is not a test-mode key. Add --live to change the live catalog.");
   }
+  const webhookUrl = optionValue(args, "--webhook-url");
   const stripe = new StripeAdmin(secretKey);
 
   const query = new URLSearchParams({ limit: "100" });
@@ -230,13 +282,22 @@ async function main(args: readonly string[]): Promise<void> {
     for (const interval of BILLING_INTERVALS) prices[plan].push(await ensurePrice(stripe, existing, plan, interval));
   }
 
+  for (const plan of BILLING_PLAN_IDS) logger.info(`Prices ${productId(plan)}: ${prices[plan].join(", ")}`);
+
   const portalUpdated = await updatePortalConfiguration(stripe, prices);
-  const lines = [
-    "Webhook endpoint: <account server origin>/v1/stripe/webhook",
-    `Events: ${BILLING_WEBHOOK_EVENTS.join(", ")}`,
-    "Local development: stripe listen --forward-to localhost:<port>/v1/stripe/webhook",
-    "Put the signing secret in STRIPE_WEBHOOK_SECRET.",
-  ];
+  const lines: string[] = [];
+  const webhookSecret = webhookUrl ? await ensureWebhookEndpoint(stripe, webhookUrl) : null;
+  if (webhookSecret) {
+    // The operator asked for this secret, and Stripe never shows it again. Standard output only, not the log.
+    process.stdout.write(`STRIPE_WEBHOOK_SECRET=${webhookSecret}\n`);
+    lines.push("Put the STRIPE_WEBHOOK_SECRET line above in the env file of that Worker.");
+  } else if (!webhookUrl) {
+    lines.push(
+      "Webhook endpoint: add --webhook-url <account server origin>/v1/stripe/webhook",
+      "Local development: stripe listen --forward-to localhost:<port>/v1/stripe/webhook",
+      "Put the signing secret in STRIPE_WEBHOOK_SECRET.",
+    );
+  }
   if (!portalUpdated) {
     lines.push(
       "No default Customer Portal configuration exists yet. Save the Customer Portal settings once in the",

@@ -1,4 +1,4 @@
-import { BILLING_CURRENCIES, type BillingCurrency } from "@openbot/contracts/billing";
+import { BILLING_CURRENCIES, BILLING_METADATA, type BillingCurrency } from "@openbot/contracts/billing";
 import { isOneOf } from "@openbot/contracts/runtime-values";
 import { z } from "zod";
 
@@ -8,6 +8,8 @@ const STRIPE_API_ORIGIN = "https://api.stripe.com";
 const STRIPE_TIMEOUT_MS = 10_000;
 /** Stripe's recommended tolerance for the webhook timestamp. */
 const SIGNATURE_TOLERANCE_SECONDS = 300;
+/** A Checkout page stays open this long. Stripe accepts 30 minutes to 24 hours. */
+const CHECKOUT_LIFETIME_SECONDS = 30 * 60;
 
 export type StripeFetch = (input: string, init: RequestInit) => Promise<Response>;
 
@@ -30,6 +32,19 @@ const stripeErrorSchema = z.object({
 });
 
 const sessionSchema = z.object({ id: z.string(), url: z.string().nullable() });
+const customerSchema = z.object({ id: z.string() });
+const checkoutSessionSchema = z.object({ id: z.string(), url: z.string().nullable(), status: z.string().nullable() });
+
+const priceSchema = z.object({
+  id: z.string(),
+  lookup_key: z.string().nullable(),
+  currency: z.string(),
+  unit_amount: z.number().int().nullable(),
+  // Present only when the request expands it.
+  currency_options: z.record(z.string(), z.object({ unit_amount: z.number().int().nullable().optional() })).optional(),
+});
+export type StripePrice = z.infer<typeof priceSchema>;
+const priceListSchema = z.object({ data: z.array(priceSchema) });
 
 const subscriptionSchema = z.object({
   id: z.string(),
@@ -109,17 +124,86 @@ export class StripeClient {
     );
   }
 
+  /** The active Prices with these lookup keys, with the amount in each currency. */
+  async listPricesByLookupKeys(lookupKeys: readonly string[]): Promise<StripePrice[]> {
+    const query = new URLSearchParams({ active: "true", limit: "100" });
+    for (const key of lookupKeys) query.append("lookup_keys[]", key);
+    query.append("expand[]", "data.currency_options");
+    return (await this.request("GET", `/v1/prices?${query}`, null, priceListSchema)).data;
+  }
+
+  /** The same idempotency key gives the same customer, so two requests at once make one customer. */
+  async createCustomer(input: { userId: string; email: string }, idempotencyKey: string): Promise<string> {
+    const body = new URLSearchParams({ email: input.email, [`metadata[${BILLING_METADATA.userId}]`]: input.userId });
+    return (await this.request("POST", "/v1/customers", body, customerSchema, idempotencyKey)).id;
+  }
+
+  /**
+   * A subscription Checkout for one server. The metadata goes on the session and on the subscription, so
+   * the webhook links the subscription to the account and the server. Each call makes a new page, so it
+   * takes no idempotency key: the caller closes the previous page.
+   */
+  async createCheckoutSession(input: {
+    customerId: string;
+    priceId: string;
+    currency: BillingCurrency;
+    userId: string;
+    serverId: string;
+    successUrl: string;
+    cancelUrl: string;
+    nowSeconds: number;
+  }): Promise<{ id: string; url: string }> {
+    const body = new URLSearchParams({
+      mode: "subscription",
+      customer: input.customerId,
+      "line_items[0][price]": input.priceId,
+      "line_items[0][quantity]": "1",
+      currency: input.currency,
+      client_reference_id: input.serverId,
+      success_url: input.successUrl,
+      cancel_url: input.cancelUrl,
+      expires_at: String(input.nowSeconds + CHECKOUT_LIFETIME_SECONDS),
+    });
+    for (const prefix of ["metadata", "subscription_data[metadata]"]) {
+      body.set(`${prefix}[${BILLING_METADATA.userId}]`, input.userId);
+      body.set(`${prefix}[${BILLING_METADATA.serverId}]`, input.serverId);
+    }
+    const session = await this.request("POST", "/v1/checkout/sessions", body, checkoutSessionSchema);
+    return { id: session.id, url: requireSessionUrl(session) };
+  }
+
+  /**
+   * Closes a Checkout page. Returns the final status: `expired`, or `complete` for a page that the user
+   * paid. Stripe refuses to expire a session that is not open, so the service then reads its status.
+   */
+  async expireCheckoutSession(sessionId: string): Promise<string | null> {
+    const path = `/v1/checkout/sessions/${encodeURIComponent(sessionId)}`;
+    try {
+      return (await this.request("POST", `${path}/expire`, new URLSearchParams(), checkoutSessionSchema)).status;
+    } catch (error) {
+      if (!(error instanceof StripeRequestError) || error.status !== 400) throw error;
+      return (await this.request("GET", path, null, checkoutSessionSchema)).status;
+    }
+  }
+
+  /** Cancels a subscription now. Stripe gives no refund and no credit for the rest of the period. */
+  cancelSubscription(subscriptionId: string): Promise<StripeSubscription> {
+    return this.request("DELETE", `/v1/subscriptions/${encodeURIComponent(subscriptionId)}`, null, subscriptionSchema);
+  }
+
   private async request<T>(
-    method: "GET" | "POST",
+    method: "GET" | "POST" | "DELETE",
     path: string,
     body: URLSearchParams | null,
     schema: z.ZodType<T>,
+    idempotencyKey?: string,
   ): Promise<T> {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.secretKey}`,
       "Stripe-Version": STRIPE_API_VERSION,
     };
     if (body) headers["Content-Type"] = "application/x-www-form-urlencoded";
+    if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
     const response = await this.fetcher(`${STRIPE_API_ORIGIN}${path}`, {
       method,
       headers,

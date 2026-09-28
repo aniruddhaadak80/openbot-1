@@ -65,6 +65,7 @@ import { clearStoredQueueEdit } from "../conversation/composer-draft";
 import { ConversationControllerProvider } from "../conversation/conversation-controller-context";
 import { composerDraftKey } from "../conversation/conversation-keys";
 import type { FilesPort } from "../files/files-port";
+import { AddServerOverlay, type AddServerResume } from "../servers/AddServerOverlay";
 import { AgentUsagePanel } from "../usage/AgentUsagePanel";
 import type { UsagePort } from "../usage/usage-port";
 import { WebAgentSettings } from "./WebAgentSettings";
@@ -77,6 +78,7 @@ import { createWebChannelsPort } from "./web-channels-runtime";
 import { createWebWorkspace, type WebRuntimeFactory } from "./web-client-context";
 import { createWebConversationRuntime } from "./web-conversation-runtime";
 import { createWebFileSaver } from "./web-file-download";
+import { createWebHostedServerCalls } from "./web-hosted-servers";
 import { createWebAgentTemplateCalls, createWebMarketplaceCalls } from "./web-marketplace";
 import { createWebProviderSettings, openWebDestination } from "./web-provider-admin";
 import { createWebServerSettings } from "./web-server-settings";
@@ -127,6 +129,9 @@ type WebWorkspaceProps = {
   /** True on a return from the Stripe Customer Portal. The Billing dialog opens on it. */
   billingReturn?: boolean;
   onBillingReturnConsumed?: () => void;
+  /** The server of a return from Stripe Checkout. The add server dialog opens on its progress. */
+  hostingReturn?: AddServerResume | null;
+  onHostingReturnConsumed?: () => void;
 };
 
 export function WebWorkspace(props: WebWorkspaceProps) {
@@ -237,6 +242,25 @@ function WebWorkspaceFrame(props: WebWorkspaceProps) {
   const [accountUsage, setAccountUsage] = createSignal<AccountUsage | null>(null);
   let usageGeneration = 0;
   const [joinOpen, setJoinOpen] = createSignal(false);
+  const hostedServerCalls = createWebHostedServerCalls(props.accountFetch);
+  const [addServer, setAddServer] = createSignal<{ resume: AddServerResume | null } | null>(null);
+  /** The plus button opens the add server dialog when the account can create hosted servers, else the join dialog. */
+  async function openAddServer(): Promise<void> {
+    const available = await hostedServerCalls.list().then(
+      (list) => list.available,
+      () => false,
+    );
+    if (available) setAddServer({ resume: null });
+    else setJoinOpen(true);
+  }
+  createEffect(
+    () => props.hostingReturn,
+    (resume) => {
+      if (!resume) return;
+      setAddServer({ resume });
+      props.onHostingReturnConsumed?.();
+    },
+  );
   const [creating, setCreating] = createSignal(false);
   /** The new agent form's avatar. The first-agent row in an empty sidebar shows it. */
   const [agentAvatar, setAgentAvatar] = createSignal(newAgentAvatar());
@@ -787,7 +811,7 @@ function WebWorkspaceFrame(props: WebWorkspaceProps) {
                   servers={servers()}
                   onSelect={selectServer}
                   onReorder={workspace.reorderHosts}
-                  onAdd={() => setJoinOpen(true)}
+                  onAdd={() => void openAddServer()}
                   onOpenSettings={(id, trigger) => void openServerSettings(id, trigger)}
                   onOpenUsage={(id, trigger) => void openUsage(id, trigger)}
                 />
@@ -816,7 +840,7 @@ function WebWorkspaceFrame(props: WebWorkspaceProps) {
                   view: layout.serverView(),
                   onViewChange: layout.setServerView,
                   onSelect: selectServer,
-                  onAdd: () => setJoinOpen(true),
+                  onAdd: () => void openAddServer(),
                   onOpenSettings: (id, trigger) => void openServerSettings(id, trigger),
                   onOpenUsage: (id, trigger) => void openUsage(id, trigger),
                 }}
@@ -921,6 +945,17 @@ function WebWorkspaceFrame(props: WebWorkspaceProps) {
           }
           after={
             <>
+              <AddServerOverlay
+                open={addServer() !== null}
+                calls={hostedServerCalls}
+                servers={servers()}
+                resume={addServer()?.resume}
+                onClose={() => setAddServer(null)}
+                onOpenServer={(serverId) => {
+                  setAddServer(null);
+                  selectServer(serverId);
+                }}
+              />
               <JoinServerOverlay
                 open={joinOpen()}
                 inviteUrl={props.inviteUrl ?? ""}

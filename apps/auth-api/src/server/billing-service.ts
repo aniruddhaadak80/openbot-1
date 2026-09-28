@@ -1,14 +1,22 @@
 import {
+  BILLING_CURRENCIES,
   BILLING_INTERVALS,
   BILLING_METADATA,
   BILLING_PLAN_IDS,
+  BILLING_PLANS,
   BILLING_SUBSCRIPTION_STATUSES,
+  type BillingCurrency,
+  type BillingInterval,
+  type BillingPlanId,
   type BillingPortalRequest,
   type BillingServerPlan,
   type BillingState,
+  type BillingSubscriptionStatus,
+  billingLookupKey,
   isBillingAmount,
   parseBillingLookupKey,
 } from "@openbot/contracts/billing";
+import type { HostedServerCatalog, HostedServerCatalogPlan } from "@openbot/contracts/hosted-servers";
 import { isDynamicRecord, isOneOf, isString } from "@openbot/contracts/runtime-values";
 import {
   isBillingCurrency,
@@ -16,6 +24,7 @@ import {
   StripeClient,
   type StripeEvent,
   type StripeFetch,
+  type StripePrice,
   StripeRequestError,
   type StripeSubscription,
   subscriptionAmount,
@@ -29,6 +38,9 @@ const WEBHOOK_EVENT_RETENTION_MS = 7 * 24 * 60 * 60_000;
 const OPEN_STATUSES_SQL = "('active', 'trialing', 'past_due', 'unpaid', 'paused')";
 /** The Remote host id shape (`requiredIdentifier` in remote-control-plane.ts). Other values are stored as no server. */
 const SERVER_ID_PATTERN = /^[A-Za-z0-9:_-]{1,128}$/u;
+/** Prices change only when `stripe-bootstrap.ts` runs, so each isolate reads them once in this time. */
+const CATALOG_TTL_MS = 5 * 60_000;
+const catalogCache = new Map<string, { expiresAt: number; prices: ReadonlyMap<string, StripePrice> }>();
 
 /** Where the Stripe page sends the user back: the desktop return page or the web client. */
 export type BillingReturnTarget = "desktop" | "web";
@@ -58,25 +70,164 @@ interface ServerPlanRow {
   cancel_at_period_end: number;
 }
 
+/** A subscription that the webhook stored, for a server that its metadata names. */
+export interface SubscriptionSync {
+  subscriptionId: string;
+  userId: string;
+  serverId: string;
+  status: BillingSubscriptionStatus;
+}
+
 export interface BillingServiceOptions {
   database: D1Database;
   secretKey: string;
   webhookSecret: string | null;
   fetch: StripeFetch;
   now?: () => number;
+  /**
+   * Runs after the webhook stores a subscription. Hosted servers use it to start or stop a server, so
+   * billing does not know about the provider. An error makes Stripe send the event again.
+   */
+  onSubscriptionSynced?: (sync: SubscriptionSync) => Promise<void>;
+}
+
+export interface CheckoutRequest {
+  user: { id: string; email: string };
+  serverId: string;
+  plan: BillingPlanId;
+  interval: BillingInterval;
+  currency: BillingCurrency;
+  target: BillingReturnTarget;
+  origin: string;
 }
 
 export class BillingService {
   readonly #database: D1Database;
   readonly #stripe: StripeClient;
+  readonly #secretKey: string;
   readonly #webhookSecret: string | null;
   readonly #now: () => number;
+  readonly #onSubscriptionSynced: ((sync: SubscriptionSync) => Promise<void>) | null;
 
   constructor(options: BillingServiceOptions) {
     this.#database = options.database;
     this.#stripe = new StripeClient(options.secretKey, options.fetch);
+    this.#secretKey = options.secretKey;
     this.#webhookSecret = options.webhookSecret;
     this.#now = options.now ?? Date.now;
+    this.#onSubscriptionSynced = options.onSubscriptionSynced ?? null;
+  }
+
+  /** The plans with their Stripe prices. A plan with no price in each currency and interval is left out. */
+  async catalog(): Promise<HostedServerCatalog> {
+    const prices = await this.#prices();
+    const plans = BILLING_PLANS.flatMap((plan): HostedServerCatalogPlan[] => {
+      const amounts: Partial<HostedServerCatalogPlan["prices"]> = {};
+      for (const currency of BILLING_CURRENCIES) {
+        const month = priceAmount(prices.get(billingLookupKey(plan.id, "month")), currency);
+        const year = priceAmount(prices.get(billingLookupKey(plan.id, "year")), currency);
+        if (month === null || year === null) return [];
+        amounts[currency] = { month, year };
+      }
+      const { eur, usd, pln } = amounts;
+      if (!eur || !usd || !pln) return [];
+      const entry = {
+        id: plan.id,
+        diskGb: plan.storageGb,
+        memberLimit: plan.memberLimit,
+        relativeSpeed: plan.relativeSpeed,
+        prices: { eur, usd, pln },
+      };
+      return [entry];
+    });
+    if (plans.length === 0) throw plansUnavailable();
+    return { plans };
+  }
+
+  /**
+   * The Stripe customer of the account. The service makes it before the first Checkout, so two open
+   * Checkouts use one customer and the webhook always knows the account.
+   */
+  async ensureCustomer(user: { id: string; email: string }): Promise<string> {
+    const existing = await this.#customerId(user.id);
+    if (existing) return existing;
+    const created = await this.#stripeCall(() =>
+      this.#stripe.createCustomer({ userId: user.id, email: user.email }, `openbot-customer-${user.id}`),
+    );
+    const now = this.#now();
+    await this.#database
+      .prepare(
+        `INSERT INTO billing_customers(user_id, stripe_customer_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`,
+      )
+      .bind(user.id, created, now, now)
+      .run();
+    const stored = await this.#customerId(user.id);
+    if (!stored) throw new BillingError(500, "billing_customer_failed", "The billing account could not be saved.");
+    return stored;
+  }
+
+  /** A Stripe Checkout page that starts the plan of one server. */
+  async createCheckout(request: CheckoutRequest): Promise<{ sessionId: string; url: string }> {
+    const price = (await this.#prices()).get(billingLookupKey(request.plan, request.interval));
+    if (!price || priceAmount(price, request.currency) === null) throw plansUnavailable();
+    const customerId = await this.ensureCustomer(request.user);
+    const returnUrl = checkoutReturnUrl(request.origin, request.target, request.serverId);
+    const session = await this.#stripeCall(() =>
+      this.#stripe.createCheckoutSession({
+        customerId,
+        priceId: price.id,
+        currency: request.currency,
+        userId: request.user.id,
+        serverId: request.serverId,
+        successUrl: returnUrl,
+        cancelUrl: `${returnUrl}${returnUrl.includes("?") ? "&" : "?"}cancelled=1`,
+        nowSeconds: Math.floor(this.#now() / 1_000),
+      }),
+    );
+    return { sessionId: session.id, url: session.url };
+  }
+
+  /** Closes a Checkout page. `paid` when the user paid on it, so no second page must open. */
+  async closeCheckout(sessionId: string): Promise<"closed" | "paid"> {
+    const status = await this.#stripeCall(() => this.#stripe.expireCheckoutSession(sessionId));
+    return status === "complete" ? "paid" : "closed";
+  }
+
+  /**
+   * Cancels each open plan of one server now, with no refund. It stops at the first plan that Stripe
+   * did not cancel, so the caller can keep the server.
+   */
+  async cancelServerPlans(userId: string, serverId: string): Promise<void> {
+    const rows = await this.#database
+      .prepare(
+        `SELECT stripe_subscription_id FROM billing_subscriptions
+         WHERE user_id = ? AND server_id = ? AND status IN ${OPEN_STATUSES_SQL}`,
+      )
+      .bind(userId, serverId)
+      .all<{ stripe_subscription_id: string }>();
+    for (const row of rows.results) await this.cancelSubscription(row.stripe_subscription_id);
+  }
+
+  /** Cancels one subscription now. A subscription that Stripe closed already counts as cancelled. */
+  async cancelSubscription(subscriptionId: string): Promise<void> {
+    await this.#stripeCall(async () => {
+      try {
+        await this.#stripe.cancelSubscription(subscriptionId);
+      } catch (error) {
+        if (!(error instanceof StripeRequestError)) throw error;
+        const current = await this.#stripe.getSubscription(subscriptionId);
+        if (current.status !== "canceled" && current.status !== "incomplete_expired") throw error;
+      }
+    });
+    // The webhook stores the final state later. Until then the plan must not count as open.
+    await this.#database
+      .prepare(
+        `UPDATE billing_subscriptions SET status = 'canceled', cancel_at_period_end = 0, updated_at = ?
+         WHERE stripe_subscription_id = ?`,
+      )
+      .bind(this.#now(), subscriptionId)
+      .run();
   }
 
   /** The open plan of each server. The server name comes only from a host that the same account owns. */
@@ -177,7 +328,8 @@ export class BillingService {
     }
     const ownerId = await this.#subscriptionOwner(subscription, customerId);
     if (!ownerId) return;
-    const serverId = subscription.metadata[BILLING_METADATA.serverId];
+    const metadataServerId = subscription.metadata[BILLING_METADATA.serverId];
+    const serverId = metadataServerId && SERVER_ID_PATTERN.test(metadataServerId) ? metadataServerId : null;
     await this.#database
       .prepare(
         `INSERT INTO billing_subscriptions(
@@ -199,7 +351,7 @@ export class BillingService {
         subscription.id,
         ownerId,
         customerId,
-        serverId && SERVER_ID_PATTERN.test(serverId) ? serverId : null,
+        serverId,
         key.plan,
         key.interval,
         currency,
@@ -210,6 +362,22 @@ export class BillingService {
         this.#now(),
       )
       .run();
+    if (serverId && this.#onSubscriptionSynced) {
+      await this.#onSubscriptionSynced({ subscriptionId, userId: ownerId, serverId, status: subscription.status });
+    }
+  }
+
+  async #prices(): Promise<ReadonlyMap<string, StripePrice>> {
+    const cached = catalogCache.get(this.#secretKey);
+    const now = this.#now();
+    if (cached && cached.expiresAt > now) return cached.prices;
+    const lookupKeys = BILLING_PLAN_IDS.flatMap((plan) =>
+      BILLING_INTERVALS.map((interval) => billingLookupKey(plan, interval)),
+    );
+    const list = await this.#stripeCall(() => this.#stripe.listPricesByLookupKeys(lookupKeys));
+    const prices = new Map(list.flatMap((price) => (price.lookup_key ? [[price.lookup_key, price] as const] : [])));
+    catalogCache.set(this.#secretKey, { expiresAt: now + CATALOG_TTL_MS, prices });
+    return prices;
   }
 
   /**
@@ -290,6 +458,23 @@ function serverPlan(row: ServerPlanRow): BillingServerPlan | null {
     currentPeriodEnd: row.current_period_end,
     cancelAtPeriodEnd: row.cancel_at_period_end === 1,
   };
+}
+
+/** The amount of one period in `currency`: the base amount, or the amount in `currency_options`. */
+function priceAmount(price: StripePrice | undefined, currency: BillingCurrency): number | null {
+  if (!price) return null;
+  const amount = price.currency === currency ? price.unit_amount : price.currency_options?.[currency]?.unit_amount;
+  return isBillingAmount(amount) ? amount : null;
+}
+
+function plansUnavailable(): BillingError {
+  return new BillingError(503, "plans_unavailable", "The plans are not available. Try again later.");
+}
+
+/** The web client opens the progress of this server again. The desktop app polls, so its page only says to go back. */
+function checkoutReturnUrl(origin: string, target: BillingReturnTarget, serverId: string): string {
+  if (target === "web") return `${origin}/app?hosting=checkout&server=${encodeURIComponent(serverId)}`;
+  return `${origin}/billing/return`;
 }
 
 function portalReturnUrl(origin: string, target: BillingReturnTarget): string {

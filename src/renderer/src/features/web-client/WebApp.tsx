@@ -14,6 +14,7 @@ import { StaticI18nProvider } from "../../i18n-context";
 import { WebWorkspace } from "./WebWorkspace";
 import { WEB_APP_BILLING_PARAM } from "./web-billing";
 import type { WebRuntimeFactory } from "./web-client-context";
+import { takeHostingReturn } from "./web-hosted-servers";
 
 /** A sign-in refusal that the login form already shows. */
 class SignInIssueShown extends Error {}
@@ -83,6 +84,7 @@ export function WebApp(props: { createRuntime?: WebRuntimeFactory } = {}) {
   const [inviteUrl, setInviteUrl] = createSignal(takeInviteLink());
   const [pluginSlug, setPluginSlug] = createSignal(takePluginLink());
   const [billingReturn, setBillingReturn] = createSignal(takeBillingReturn());
+  const [hostingReturn, setHostingReturn] = createSignal(takeHostingReturn());
   let channel: BroadcastChannel | null = null;
   let disposed = false;
   let sessionGeneration = 0;
@@ -312,6 +314,8 @@ export function WebApp(props: { createRuntime?: WebRuntimeFactory } = {}) {
                 onPluginSlugConsumed={() => setPluginSlug(null)}
                 billingReturn={billingReturn()}
                 onBillingReturnConsumed={() => setBillingReturn(false)}
+                hostingReturn={hostingReturn()}
+                onHostingReturnConsumed={() => setHostingReturn(null)}
               />
             )}
           </Show>

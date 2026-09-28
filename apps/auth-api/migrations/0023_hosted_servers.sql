@@ -6,13 +6,24 @@ CREATE TABLE hosted_servers (
   name TEXT NOT NULL,
   provider TEXT NOT NULL DEFAULT 'boat' CHECK(provider IN ('boat')),
   provider_sandbox_id TEXT UNIQUE,
-  size TEXT NOT NULL CHECK(size IN ('small', 'default')),
-  desired_state TEXT NOT NULL CHECK(desired_state IN ('running', 'deleted')),
+  size TEXT NOT NULL CHECK(size IN ('small', 'default', 'large')),
+  -- The plan that the first Checkout sells. The Stripe subscription (billing_subscriptions) is the
+  -- truth after that: a change in the Customer Portal does not update these three columns.
+  plan TEXT NOT NULL CHECK(plan IN ('starter', 'standard', 'pro')),
+  billing_interval TEXT NOT NULL CHECK(billing_interval IN ('month', 'year')),
+  currency TEXT NOT NULL CHECK(currency IN ('eur', 'usd', 'pln')),
+  -- The newest Checkout Session of a server that waits for its first payment.
+  checkout_session_id TEXT,
+  -- 'stopped': the plan ended. The sandbox is archived and kept, and it starts again on renewal.
+  desired_state TEXT NOT NULL CHECK(desired_state IN ('running', 'stopped', 'deleted')),
   observed_state TEXT NOT NULL CHECK(
-    observed_state IN ('creating', 'starting', 'running', 'stopping', 'stopped', 'waking', 'error', 'deleted')
+    observed_state IN (
+      'awaiting_payment', 'creating', 'starting', 'running', 'stopping', 'stopped', 'waking', 'error', 'deleted'
+    )
   ),
   observed_error TEXT CHECK(
-    observed_error IS NULL OR observed_error IN ('provider_error', 'provider_billing', 'provider_limit', 'start_failed')
+    observed_error IS NULL OR
+    observed_error IN ('provider_error', 'provider_billing', 'provider_limit', 'start_failed', 'plan_ended')
   ),
   -- The creation time of the newest provider event applied. Older events that arrive late are ignored.
   provider_event_at INTEGER,

@@ -120,6 +120,8 @@ export interface SettingsModalProps {
   billingApi?: BillingDesktopApi;
   /** The account's hosted servers. The tab is shown only when the account server offers them. */
   hostedServersApi?: HostedServersDesktopApi;
+  /** Opens the add server dialog from the Hosted servers tab. */
+  onAddHostedServer?: () => void;
   /** The agents granted a standing approval, so the user can see and undo each one. */
   turboModePending?: boolean;
   onTestNotification?: () => void | Promise<void>;
@@ -444,7 +446,7 @@ export function SettingsModal(props: SettingsModalProps) {
         </Tabs.Content>
         <Show when={hostedServersShown()}>
           <Tabs.Content value="hosted-servers" class="settings-modal-tab-panel" data-tab="hosted-servers">
-            <SettingsHostedServersTab store={hostedServers} selectMount={modalElement} />
+            <SettingsHostedServersTab store={hostedServers} onAddServer={props.onAddHostedServer} />
           </Tabs.Content>
         </Show>
       </SettingsDialogShell>

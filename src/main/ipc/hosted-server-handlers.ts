@@ -21,7 +21,12 @@ export function hostedServerIpcHandlers({
   return {
     hostedServers: {
       list: handler(() => hostedServers.list()),
+      plans: handler(() => hostedServers.plans()),
       create: payloadHandler(parseCreate, (input) => hostedServers.create(input)),
+      openCheckout: payloadHandler(
+        (value) => requireString(value, "serverId", INPUT_LIMITS.identifier),
+        (serverId) => hostedServers.openCheckout(serverId),
+      ),
       delete: payloadHandler(parseDelete, (input) => hostedServers.delete(input)),
       wake: payloadHandler(
         (value) => requireString(value, "serverId", INPUT_LIMITS.identifier),

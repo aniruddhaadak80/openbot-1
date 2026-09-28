@@ -1,15 +1,16 @@
-import {
-  DEFAULT_HOSTED_SERVER_SIZE,
-  type HostedServerSize,
-  type HostedServerState,
-  type HostedServerSummary,
-} from "@openbot/contracts/hosted-servers";
+import type { HostedServerState, HostedServerSummary } from "@openbot/contracts/hosted-servers";
 import type { HostedServersDesktopApi } from "@openbot/contracts/ipc";
 import { createEffect, createStore, untrack } from "solid-js";
 import { currentText } from "../../../text";
 
 /** A server in one of these states changes without a user action, so the list polls while one is shown. */
-const TRANSITION_STATES: ReadonlySet<HostedServerState> = new Set(["creating", "starting", "stopping", "waking"]);
+const TRANSITION_STATES: ReadonlySet<HostedServerState> = new Set([
+  "awaiting_payment",
+  "creating",
+  "starting",
+  "stopping",
+  "waking",
+]);
 const TRANSITION_REFRESH_INTERVAL_MS = 5_000;
 
 interface HostedServersStoreProps {
@@ -23,11 +24,9 @@ interface HostedServersPanel {
   loaded: boolean;
   error: string | null;
   servers: HostedServerSummary[];
-  draftName: string;
-  draftSize: HostedServerSize;
-  creating: boolean;
-  createError: string | null;
   wakingServerId: string | null;
+  /** The server whose payment page is opening. */
+  checkoutServerId: string | null;
   /** The server the confirmation dialog asks about. */
   pendingDelete: HostedServerSummary | null;
   /** The name that the user types to confirm the deletion. */
@@ -37,8 +36,9 @@ interface HostedServersPanel {
 }
 
 /**
- * The Hosted servers tab: the server list, the create form, wake, and the delete confirmation.
- * The list loads when the dialog opens, because the tab is shown only when the account can use it.
+ * The Hosted servers tab: the server list, wake, the payment page, and the delete confirmation. A new
+ * server starts in the add server dialog, because it needs a plan. The list loads when the dialog
+ * opens, because the tab is shown only when the account can use it.
  */
 export function createSettingsHostedServersStore(props: HostedServersStoreProps, isActive: () => boolean) {
   const [panel, setPanel] = createStore<HostedServersPanel>({
@@ -46,21 +46,13 @@ export function createSettingsHostedServersStore(props: HostedServersStoreProps,
     loaded: false,
     error: null,
     servers: [],
-    draftName: "",
-    draftSize: DEFAULT_HOSTED_SERVER_SIZE,
-    creating: false,
-    createError: null,
     wakingServerId: null,
+    checkoutServerId: null,
     pendingDelete: null,
     deleteConfirmName: "",
     deleting: false,
     deleteError: null,
   });
-  /**
-   * One key for each server that the user asks for. A retry after a lost response sends the same
-   * key, so the account server returns the first server and does not create a second one.
-   */
-  let requestId = crypto.randomUUID();
   let loadRevision = 0;
 
   async function load(): Promise<void> {
@@ -101,48 +93,6 @@ export function createSettingsHostedServersStore(props: HostedServersStoreProps,
     },
   );
 
-  function setDraftName(value: string): void {
-    setPanel((state) => {
-      state.draftName = value;
-      state.createError = null;
-    });
-  }
-
-  function setDraftSize(value: HostedServerSize): void {
-    setPanel((state) => {
-      state.draftSize = value;
-    });
-  }
-
-  async function create(): Promise<void> {
-    const api = props.hostedServersApi;
-    const name = panel.draftName.trim();
-    if (!api || !name || panel.creating) return;
-    setPanel((state) => {
-      state.creating = true;
-      state.createError = null;
-    });
-    try {
-      const server = await api.create({ name, size: panel.draftSize, requestId });
-      requestId = crypto.randomUUID();
-      setPanel((state) => {
-        state.servers = [...state.servers.filter((entry) => entry.serverId !== server.serverId), server];
-        state.draftName = "";
-        state.draftSize = DEFAULT_HOSTED_SERVER_SIZE;
-      });
-      await load();
-    } catch (error) {
-      setPanel((state) => {
-        const text = currentText();
-        state.createError = text.errorMessage(error, text.t("settings.hostedServers.createFailed"));
-      });
-    } finally {
-      setPanel((state) => {
-        state.creating = false;
-      });
-    }
-  }
-
   async function wake(server: HostedServerSummary): Promise<void> {
     const api = props.hostedServersApi;
     if (!api || panel.wakingServerId) return;
@@ -163,6 +113,34 @@ export function createSettingsHostedServersStore(props: HostedServersStoreProps,
     } finally {
       setPanel((state) => {
         state.wakingServerId = null;
+      });
+    }
+  }
+
+  /**
+   * Opens the payment page of a server that waits for payment, or a new plan for a server whose plan
+   * ended. The account server refuses a second plan while an unpaid one is open.
+   */
+  async function openCheckout(server: HostedServerSummary): Promise<void> {
+    const api = props.hostedServersApi;
+    if (!api || panel.checkoutServerId) return;
+    setPanel((state) => {
+      state.checkoutServerId = server.serverId;
+      state.error = null;
+    });
+    try {
+      const updated = await api.openCheckout(server.serverId);
+      setPanel((state) => {
+        state.servers = state.servers.map((entry) => (entry.serverId === updated.serverId ? updated : entry));
+      });
+    } catch (error) {
+      setPanel((state) => {
+        const text = currentText();
+        state.error = text.errorMessage(error, text.t("settings.hostedServers.checkoutFailed"));
+      });
+    } finally {
+      setPanel((state) => {
+        state.checkoutServerId = null;
       });
     }
   }
@@ -233,10 +211,8 @@ export function createSettingsHostedServersStore(props: HostedServersStoreProps,
   return {
     state: panel,
     load,
-    setDraftName,
-    setDraftSize,
-    create,
     wake,
+    openCheckout,
     requestDelete,
     setDeleteConfirmName,
     cancelDelete,

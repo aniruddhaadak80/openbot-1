@@ -433,7 +433,7 @@ export async function createApplicationServices({
   await dataSkill.syncAll(store.list());
   const hostedSites = new HostedSiteDesktopService(centralAuth);
   const billing = new BillingDesktopService(centralAuth, (url) => shell.openExternal(url));
-  const hostedServers = new HostedServerDesktopService(centralAuth);
+  const hostedServers = new HostedServerDesktopService(centralAuth, (url) => shell.openExternal(url));
   const sidebarLayout = new SidebarLayoutStore(join(app.getPath("userData"), SIDEBAR_LAYOUT_FILE));
   await sidebarLayout.initialize();
   const mailbox = new MailboxStore(app.getPath("userData"), store.sharedRoot, store.database);

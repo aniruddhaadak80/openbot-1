@@ -20,6 +20,7 @@ import type { BillingPortalRequest, BillingState } from "./billing";
 import type {
   CreateHostedServerInput,
   DeleteHostedServerInput,
+  HostedServerCatalog,
   HostedServerList,
   HostedServerSummary,
 } from "./hosted-servers";
@@ -562,7 +563,10 @@ export const IPC_ENDPOINTS = {
   // that the account is a member of; it answers 404 for a host that is not a hosted server.
   hostedServers: {
     list: request<undefined, HostedServerList>()("hosted-servers:list"),
+    plans: request<undefined, HostedServerCatalog>()("hosted-servers:plans"),
+    // Main opens the Stripe Checkout page and returns only the server, which waits for the payment.
     create: request<CreateHostedServerInput, HostedServerSummary>()("hosted-servers:create"),
+    openCheckout: request<string, HostedServerSummary>()("hosted-servers:open-checkout"),
     delete: request<DeleteHostedServerInput, void>()("hosted-servers:delete"),
     wake: request<string, HostedServerSummary>()("hosted-servers:wake"),
   },

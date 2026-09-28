@@ -57,6 +57,15 @@ export const messages = defineMessages("server", {
   "server.add.custom.description": "We can run OpenBot on a dedicated Mac mini, or make a plan for your company.",
   "server.add.custom.action": "Contact us",
   "server.hosted.progressTitle": "Setting up {name}",
+  // The setup waits for the first payment on the Stripe page in the browser.
+  "server.hosted.paymentTitle": "Finish the payment in your browser",
+  "server.hosted.paymentDescription": "The setup starts when Stripe confirms the payment.",
+  "server.hosted.openPayment": "Open the payment page again",
+  "server.hosted.openingPayment": "Opening…",
+  "server.hosted.paymentFailed": "Could not open the payment page.",
+  // The name of a new server. {number} is a number, such as 2.
+  "server.hosted.defaultName": "Cloud server",
+  "server.hosted.defaultNameNumbered": "Cloud server {number}",
   "server.hosted.step.create": "Create the machine",
   "server.hosted.step.start": "Start OpenBot",
   "server.hosted.step.connect": "Connect to your account",

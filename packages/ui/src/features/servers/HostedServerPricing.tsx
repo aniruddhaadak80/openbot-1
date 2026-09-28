@@ -1,3 +1,5 @@
+import type { BillingCurrency, BillingPlanId } from "@openbot/contracts/billing";
+import type { HostedServerCatalog } from "@openbot/contracts/hosted-servers";
 import type { AppFormat, AppTextKey } from "@openbot/i18n";
 import {
   Badge,
@@ -18,11 +20,18 @@ import { prefersReducedMotion } from "@openbot/ui/utils";
 import { createMemo, For, Show, untrack } from "solid-js";
 import { useText } from "../../text";
 
-export type HostedServerPlanId = "starter" | "standard" | "pro";
+export type HostedServerPlanId = BillingPlanId;
 export type HostedServerBilling = "monthly" | "yearly";
 
 export const HOSTED_CURRENCIES = ["EUR", "USD", "PLN"] as const;
 export type HostedCurrency = (typeof HOSTED_CURRENCIES)[number];
+
+/** The Stripe currency of each shown currency. */
+export const HOSTED_BILLING_CURRENCY = {
+  EUR: "eur",
+  USD: "usd",
+  PLN: "pln",
+} as const satisfies Record<HostedCurrency, BillingCurrency>;
 
 /**
  * A first guess of the currency from the computer's time zone, for when the consumer does not know
@@ -41,11 +50,13 @@ export interface HostedServerPlan {
    * conversions, so each one is a round number.
    */
   monthlyPrice: Record<HostedCurrency, number>;
+  /** The price for one year on yearly billing, in each currency. */
+  yearlyPrice: Record<HostedCurrency, number>;
   diskGb: number;
   /** The most active members of the server, the owner included. */
   memberLimit: number;
   /** The speed compared with the smallest plan. 1 is the base speed. */
-  relativeSpeed: 1 | 2 | 4;
+  relativeSpeed: number;
 }
 
 /** Yearly billing costs this much less than twelve monthly payments. */
@@ -57,8 +68,27 @@ export function hostedPlanMonthlyPrice(
   billing: HostedServerBilling,
   currency: HostedCurrency,
 ): number {
-  const regular = plan.monthlyPrice[currency];
-  return billing === "yearly" ? (regular * (100 - YEARLY_DISCOUNT_PERCENT)) / 100 : regular;
+  return billing === "yearly" ? plan.yearlyPrice[currency] / 12 : plan.monthlyPrice[currency];
+}
+
+/** The plans of the Stripe catalog. The catalog has amounts in cents; the plans show whole units. */
+export function hostedServerPlansFromCatalog(catalog: HostedServerCatalog): HostedServerPlan[] {
+  const amounts = (
+    prices: HostedServerCatalog["plans"][number]["prices"],
+    interval: "month" | "year",
+  ): Record<HostedCurrency, number> => ({
+    EUR: prices.eur[interval] / 100,
+    USD: prices.usd[interval] / 100,
+    PLN: prices.pln[interval] / 100,
+  });
+  return catalog.plans.map((plan) => ({
+    id: plan.id,
+    monthlyPrice: amounts(plan.prices, "month"),
+    yearlyPrice: amounts(plan.prices, "year"),
+    diskGb: plan.diskGb,
+    memberLimit: plan.memberLimit,
+    relativeSpeed: plan.relativeSpeed,
+  }));
 }
 
 const PLAN_TEXT = {

@@ -21,6 +21,31 @@ sandbox keys. `bun run dev:api` decrypts it in memory. Ask a maintainer for
 Stripe keys. A value in `.env.dev` overrides the shared value. To change a value, run
 `bunx dotenvx set <NAME> <value> -f apps/auth-api/.env.shared -fk .env.keys`.
 
+### Stripe sandbox
+
+`bun run api:stripe:bootstrap` creates the six plan Prices (lookup keys `openbot_{plan}_{month|year}`)
+and the Customer Portal settings in the Stripe account of `STRIPE_SECRET_KEY`. It is safe to run
+again: a changed amount makes a new Price and moves the lookup key to it. After the first run, save
+the Customer Portal settings once in the Stripe Dashboard.
+
+For a local Worker, forward the webhooks and put the secret that `stripe listen` prints in your
+own `.env.dev` as `STRIPE_WEBHOOK_SECRET`:
+
+```bash
+stripe listen --forward-to http://127.0.0.1:3100/v1/stripe/webhook
+```
+
+For the `test` Worker, add `--webhook-url` to make or update its webhook endpoint. The command
+prints the signing secret one time; put it in `.env.shared`:
+
+```bash
+bun run api:stripe:bootstrap -- --webhook-url https://<test Worker origin>/v1/stripe/webhook
+bunx dotenvx set STRIPE_WEBHOOK_SECRET <whsec_...> -f apps/auth-api/.env.shared -fk .env.keys
+```
+
+`bun run api:deploy:test` reads `.env.shared` before `.env.production`. The first file wins, so the
+test Worker gets the sandbox keys, never live keys.
+
 `.env.production` is the only encrypted production file, and its private key stays in the
 ignored root `.env.keys`. Dotenvx decrypts it only in process memory, and only
 the deploy and secret-rotation commands read it.

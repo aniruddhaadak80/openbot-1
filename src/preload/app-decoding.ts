@@ -7,8 +7,10 @@
 import { isAgentTemplateId } from "@openbot/contracts/agent-template-links";
 import { type BillingState, parseBillingState } from "@openbot/contracts/billing";
 import {
+  type HostedServerCatalog,
   type HostedServerList,
   type HostedServerSummary,
+  parseHostedServerCatalog,
   parseHostedServerList,
   parseHostedServerSummary,
 } from "@openbot/contracts/hosted-servers";
@@ -288,6 +290,12 @@ export function decodeHostedServer(value: unknown): HostedServerSummary {
   const server = parseHostedServerSummary(value);
   if (!server) throw new Error("Invalid hosted server response.");
   return server;
+}
+
+export function decodeHostedServerCatalog(value: unknown): HostedServerCatalog {
+  const catalog = parseHostedServerCatalog(value);
+  if (!catalog) throw new Error("Invalid hosted server plans response.");
+  return catalog;
 }
 
 export function decodeHostedServerList(value: unknown): HostedServerList {

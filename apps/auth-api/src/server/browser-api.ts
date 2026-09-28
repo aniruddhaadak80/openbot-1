@@ -45,7 +45,7 @@ export interface BrowserApiServices {
   >;
   /** The stored logo of one host version, or null. The handler checks membership and the version first. */
   hostLogo: (hostId: string, version: string) => Promise<Response | null>;
-  hosting: () => Pick<HostedServerService, "list" | "create" | "delete" | "wake">;
+  hosting: () => Pick<HostedServerService, "list" | "plans" | "create" | "checkout" | "delete" | "wake">;
   inviteEmailDelivery: () => TeamInviteEmailDelivery | null;
   /** The billing service, or null when this deployment has no Stripe key. */
   billing: () => Pick<BillingService, "getState" | "createPortal"> | null;
@@ -297,6 +297,9 @@ async function handleHosting(
   user: AuthUser,
   services: BrowserApiServices,
 ): Promise<Response | null> {
+  // Stripe sends the user back to `/app` on this origin, not to the desktop return page.
+  const returnTo = { target: "web", origin: new URL(request.url).origin } as const;
+  if (path === "v2/hosting/plans" && request.method === "GET") return json(await services.hosting().plans(user));
   if (path === "v2/hosting/servers") {
     if (request.method === "GET") return json(await services.hosting().list(user));
     if (request.method !== "POST") return null;
@@ -304,14 +307,22 @@ async function handleHosting(
     return json(
       await services
         .hosting()
-        .create(user, { name: body.name, size: body.size }, request.headers.get("Idempotency-Key")),
+        .create(
+          user,
+          { name: body.name, plan: body.plan, interval: body.interval, currency: body.currency },
+          request.headers.get("Idempotency-Key"),
+          returnTo,
+        ),
       201,
     );
   }
-  const [, encodedServerId, action] = /^v2\/hosting\/servers\/([^/]+)(?:\/(wake))?$/u.exec(path) ?? [];
+  const [, encodedServerId, action] = /^v2\/hosting\/servers\/([^/]+)(?:\/(wake|checkout))?$/u.exec(path) ?? [];
   if (encodedServerId === undefined) return null;
   const serverId = decodeURIComponent(encodedServerId);
   if (action === "wake" && request.method === "POST") return json(await services.hosting().wake(user, serverId));
+  if (action === "checkout" && request.method === "POST") {
+    return json(await services.hosting().checkout(user, serverId, returnTo));
+  }
   if (action === undefined && request.method === "DELETE") {
     const body = await readJsonObject(request);
     await services.hosting().delete(user, serverId, body.confirmName);

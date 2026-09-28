@@ -6,7 +6,9 @@ the Linux build of OpenBot under Xvfb. The server runs all the time (24/7). It d
 it is idle. When boat stops a sandbox, the Worker starts it again.
 
 Hosted servers are a development feature. Only the `test` Worker environment enables them, and
-only for the account IDs in `HOSTED_SERVERS_ALLOWED_USER_IDS`. There is no billing yet.
+only for the account IDs in `HOSTED_SERVERS_ALLOWED_USER_IDS`, and only when the Worker has
+`STRIPE_SECRET_KEY`. Each server has its own Stripe plan. Its machine comes from the plan
+(`HOSTED_PLAN_SIZE`): Starter is boat `small`, Standard is `default`, and Pro is `large`.
 
 ## Parts
 
@@ -16,36 +18,56 @@ only for the account IDs in `HOSTED_SERVERS_ALLOWED_USER_IDS`. There is no billi
 | Server template | `scripts/hosting/` | Builds the boat named snapshot that each server starts from. |
 | Server bootstrap | `src/main/hosted-server-bootstrap.ts` | On the first start, redeems the claim, signs in, and publishes the host. |
 | Start retry | `src/main/hosted-server-start-retry.ts` | Publishes the host again after a failed start. |
-| Desktop and web clients | `SettingsHostedServersTab`, `hosted-server-service.ts`, `web-hosted-server-wake.ts` | List, create, start and delete. Start a stopped server when a connection fails. |
+| Billing link | `apps/auth-api/src/server/hosted-billing.ts`, `billing-service.ts` | Opens Stripe Checkout for a new server. Tells the hosting service when a subscription changes. |
+| Desktop and web clients | `AddServerOverlay`, `SettingsHostedServersTab`, `hosted-server-service.ts`, `web-hosted-servers.ts`, `web-hosted-server-wake.ts` | Pick a plan, pay, list, start, renew and delete. Start a stopped server when a connection fails. |
 
 ## Lifecycle
 
-States: `creating → starting → running`; `running → stopping → stopped → waking → running` when boat stops a sandbox; and `error` and
+States: `awaiting_payment → creating → starting → running`; `running → stopping → stopped → waking → running` when boat stops a sandbox; and `error` and
 `deleted`. The Worker stores what it wants (`desired_state`) and what boat reports
 (`observed_state`). boat webhooks and the cron update `observed_state`.
 
-1. **Create.** `POST /v2/hosting/servers/` with `{name, size}` and an `Idempotency-Key`. The Worker
-   makes the host ID and a single-use claim (1 hour). It stores only the claim hash. It creates the
-   sandbox from `HOSTED_SERVER_TEMPLATE` with `noEnv: true`, so no operator secret or repository
-   goes into the sandbox. The sandbox env holds only `OPENBOT_HOSTED_HOST_ID` and
-   `OPENBOT_HOSTED_CLAIM`.
-2. **Env handoff.** boat puts the sandbox env in the setup script, not in systemd. The Worker sends
+1. **Create.** The rail plus button opens the add server dialog when the account can create hosted
+   servers; otherwise it opens the join dialog. A plan sends `POST /v2/hosting/servers/` with
+   `{name, plan, interval, currency}` and an `Idempotency-Key`. The Worker stores a row in
+   `awaiting_payment` with no claim and no sandbox, makes the Stripe customer, and returns a Stripe
+   Checkout URL (30 minutes). A repeated request expires the old Checkout and returns a new one.
+   The desktop main process opens the URL only when it is an `https://checkout.stripe.com` URL; the
+   renderer never gets it. The web client goes to the page in the same tab, and Stripe returns to
+   `/app?hosting=checkout&server=<id>` (`&cancelled=1` when the user went back).
+   `POST /v2/hosting/servers/:id/checkout` makes a new page for "Open the payment page again".
+2. **Provision.** The signed Stripe webhook syncs the subscription to D1 and calls
+   `onSubscriptionSynced`. When the plan is open and the row waits for payment, the Worker makes
+   the host ID claim (single use, 1 hour; it stores only the hash) and creates the sandbox from
+   `HOSTED_SERVER_TEMPLATE` with `noEnv: true`, so no operator secret or repository goes into the
+   sandbox. The sandbox env holds only `OPENBOT_HOSTED_HOST_ID` and `OPENBOT_HOSTED_CLAIM`. The cron
+   provisions a paid row when the webhook call failed, and deletes an unpaid row after 24 hours
+   (it has no sandbox, so no data is lost).
+3. **Env handoff.** boat puts the sandbox env in the setup script, not in systemd. The Worker sends
    `setupScript: exec /opt/OpenBot/hosted/openbot-hosted-env`. That helper writes the two values to
    `~/.config/openbot-hosted/env` (mode 0600). `openbot.service` waits for this file.
-3. **First boot.** OpenBot starts with `OPENBOT_HOSTED_SERVER=1`. It redeems the claim at
+4. **First boot.** OpenBot starts with `OPENBOT_HOSTED_SERVER=1`. It redeems the claim at
    `POST /v2/hosting/claims/redeem`, signs in as the owner, keeps the host ID, and publishes the
    host. `registerHost` refuses the host ID for any other account.
-4. **Always on.** The server never asks to stop. `desired_state` is `running` until the user
-   deletes the server. When boat reports `archived` (for example, after maintenance), the webhook
+5. **Always on.** The server never asks to stop. `desired_state` is `running` while the plan is
+   open. When boat reports `archived` (for example, after maintenance), the webhook
    resumes the sandbox at once. The Worker cron (each minute on `test`) resumes a server that stays
    `stopped` for 2 minutes.
-5. **Start after a failure.** A client that cannot reach the host calls
+6. **Start after a failure.** A client that cannot reach the host calls
    `POST /v2/hosting/servers/:id/wake` (owner or member; 404 for a host that is not a hosted
    server). This resumes a `stopped` sandbox or one in `error`. The desktop does this when Signal
    answers `host_unavailable`, at most once a minute for each host. The web client does this when a
-   connection fails, then connects again every 5 seconds.
-6. **Delete.** `DELETE /v2/hosting/servers/:id` with `{confirmName}`. The Worker deletes the sandbox
-   and its Remote host. The D1 row stays with `desired_state = 'deleted'`, so a sandbox is never
+   connection fails, then connects again every 5 seconds. A server whose plan ended answers
+   `402 plan_required`.
+7. **Plan ends.** When the subscription is cancelled or unpaid, or `past_due` after its period
+   end, the Worker sets `desired_state = 'stopped'` with the error `plan_ended` and stops the
+   sandbox. boat saves the disk; the Worker never deletes it. "Renew plan" in Settings calls the
+   checkout route: the Worker makes a new plan only when no open plan exists for the server. With
+   an open, unpaid plan it answers `409 hosted_server_payment_due`, and the user pays in the Billing
+   Customer Portal. When the plan is open again, the Worker resumes the sandbox.
+8. **Delete.** `DELETE /v2/hosting/servers/:id` with `{confirmName}`. The Worker first cancels the
+   open plan now, with no refund. A Stripe failure stops the delete (502), so the user does not pay
+   for a deleted server. Then it deletes the sandbox and its Remote host. The D1 row stays with `desired_state = 'deleted'`, so a sandbox is never
    left without a record.
 
 ## Configure the test Worker
@@ -107,5 +129,9 @@ These were not tested on boat. Test them before a user gets access:
 - that production Signal accepts tickets from the `test` Worker;
 - a lost response to the boat create call. The idempotency key is the host ID, so a retry returns
   the same sandbox, but no retry runs by itself;
+- the vCPU, memory and disk of boat `large`;
+- a plan change in the Customer Portal. The plan changes, but the sandbox keeps its size;
+- a provision error with an open plan. The Worker does not try again; the user can delete the
+  server, which cancels the plan;
 - whether boat stops a sandbox that runs for weeks. The Worker restarts it, but work in progress
   at that time stops.

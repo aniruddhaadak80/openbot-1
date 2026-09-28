@@ -1,21 +1,31 @@
 import { createHmac } from "node:crypto";
-import { readdirSync, readFileSync } from "node:fs";
-import { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "node:sqlite";
+import { BILLING_CURRENCIES, BILLING_INTERVALS, BILLING_PLAN_IDS } from "@openbot/contracts/billing";
 import { isDynamicRecord, isString } from "@openbot/contracts/runtime-values";
 import { exportJWK, generateKeyPair } from "jose";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { BillingService } from "../src/server/billing-service";
 import { D1AuthRepository } from "../src/server/d1-auth-repository";
 import { HostedServerService } from "../src/server/hosted-server-service";
 import { RemoteControlPlane } from "../src/server/remote-control-plane";
-import { sqliteD1 } from "./sqlite-d1";
+import { migratedDatabase, sqliteD1 } from "./sqlite-d1";
 
 const owner = { id: "owner", email: "owner@example.test", name: null, avatarUrl: null };
 const member = { id: "member", email: "member@example.test", name: null, avatarUrl: null };
 const stranger = { id: "stranger", email: "stranger@example.test", name: null, avatarUrl: null };
-const WEBHOOK_SECRET = "whsec_test";
+const BOAT_WEBHOOK_SECRET = "whsec_boat";
+const STRIPE_WEBHOOK_SECRET = "whsec_stripe";
+const ORIGIN = "https://openbot.test";
+const RETURN = { target: "desktop", origin: ORIGIN } as const;
+const STARTER = { name: "Cloud one", plan: "starter", interval: "month", currency: "eur" } as const;
 const MINUTE = 60_000;
+const databases: DatabaseSync[] = [];
 
-interface BoatCall {
+afterEach(() => {
+  for (const database of databases.splice(0)) database.close();
+});
+
+interface Call {
   method: string;
   path: string;
   headers: Headers;
@@ -23,21 +33,17 @@ interface BoatCall {
 }
 
 async function setup() {
-  const database = new DatabaseSync(":memory:");
-  const migrations = new URL("../migrations/", import.meta.url);
-  for (const name of readdirSync(migrations)
-    .filter((entry) => entry.endsWith(".sql"))
-    .sort()) {
-    database.exec(readFileSync(new URL(name, migrations), "utf8"));
-  }
+  const database = migratedDatabase();
+  databases.push(database);
   for (const user of [owner, member, stranger]) {
     database
       .prepare("INSERT INTO users(id, identity_key, email, created_at, updated_at) VALUES (?, ?, ?, 1, 1)")
       .run(user.id, `email:${user.email}`, user.email);
   }
   const clock = { now: Date.UTC(2026, 8, 1, 12) };
-  const calls: BoatCall[] = [];
+  const boatCalls: Call[] = [];
   const claims: string[] = [];
+  let sandboxes = 0;
   const boatFetch = async (input: string, init: RequestInit) => {
     const url = new URL(input);
     const call = {
@@ -46,12 +52,14 @@ async function setup() {
       headers: new Headers(init.headers),
       body: init.body ? JSON.parse(String(init.body)) : null,
     };
-    calls.push(call);
+    boatCalls.push(call);
     if (isDynamicRecord(call.body) && isDynamicRecord(call.body.env) && isString(call.body.env.OPENBOT_HOSTED_CLAIM)) {
       claims.push(call.body.env.OPENBOT_HOSTED_CLAIM);
     }
     if (call.method === "POST" && call.path === "/sandboxes") {
-      return Response.json({ ok: true, status: "provisioning", sandbox: { id: "bx_1", state: "provisioning" } });
+      sandboxes += 1;
+      const id = `bx_${sandboxes}`;
+      return Response.json({ ok: true, status: "provisioning", sandbox: { id, state: "provisioning" } });
     }
     return Response.json({ ok: true, id: "bx_1", status: "ok" });
   };
@@ -66,38 +74,91 @@ async function setup() {
     HOSTED_SERVERS_ALLOWED_USER_IDS: "owner, member",
     HOSTED_SERVER_TEMPLATE: "openbot-server-test",
     BOAT_API_KEY: "boat-key",
-    BOAT_WEBHOOK_SECRET: WEBHOOK_SECRET,
+    BOAT_WEBHOOK_SECRET: BOAT_WEBHOOK_SECRET,
   };
+  const stripe = new FakeStripe();
   const remote = new RemoteControlPlane(bindings, { now: () => clock.now, fetch: async () => new Response(null) });
+  const billing = new BillingService({
+    database: bindings.DB,
+    // A key for each test run: the Price catalog is cached for each key.
+    secretKey: `sk_test_${crypto.randomUUID()}`,
+    webhookSecret: STRIPE_WEBHOOK_SECRET,
+    fetch: (input, init) => stripe.fetch(input, init),
+    now: () => clock.now,
+    onSubscriptionSynced: (sync) => service.onSubscriptionSynced(sync),
+  });
   const service = new HostedServerService(bindings, {
     fetch: boatFetch,
     now: () => clock.now,
     removeHost: (ownerUserId, hostId) => remote.deleteHost(ownerUserId, hostId),
+    billing,
   });
   let delivery = 0;
-  const webhook = (type: string, state: string | null, options: { createdAt?: number; timestamp?: number } = {}) => {
+  const boatWebhook = (
+    type: string,
+    state: string | null,
+    options: { createdAt?: number; timestamp?: number; sandboxId?: string } = {},
+  ) => {
     delivery += 1;
     const body = JSON.stringify({
       id: `evt_${delivery}`,
       type,
       createdAt: new Date(options.createdAt ?? clock.now).toISOString(),
-      data: { sandbox: { id: "bx_1", name: "server" }, ...(state ? { state } : {}) },
+      data: { sandbox: { id: options.sandboxId ?? "bx_1", name: "server" }, ...(state ? { state } : {}) },
     });
     const timestamp = String(Math.floor((options.timestamp ?? clock.now) / 1_000));
     const deliveryId = `evt_${delivery}`;
-    const signature = `v1=${createHmac("sha256", WEBHOOK_SECRET).update(`${deliveryId}.${timestamp}.${body}`).digest("hex")}`;
+    const signature = `v1=${createHmac("sha256", BOAT_WEBHOOK_SECRET).update(`${deliveryId}.${timestamp}.${body}`).digest("hex")}`;
     return { deliveryId, timestamp, signature, body };
+  };
+  /** Stripe stores the subscription in this state and sends the webhook. */
+  const stripeSync = (subscriptionId: string, status: string, serverId: string, customer = "cus_1") => {
+    stripe.subscriptions.set(subscriptionId, subscription(subscriptionId, status, serverId, customer, clock.now));
+    delivery += 1;
+    const payload = JSON.stringify({
+      id: `evt_stripe_${delivery}`,
+      type: "customer.subscription.updated",
+      created: Math.floor(clock.now / 1_000),
+      data: { object: { id: subscriptionId } },
+    });
+    const seconds = Math.floor(clock.now / 1_000);
+    const signature = `t=${seconds},v1=${createHmac("sha256", STRIPE_WEBHOOK_SECRET).update(`${seconds}.${payload}`).digest("hex")}`;
+    return billing.handleWebhook(payload, signature);
   };
   const state = (serverId: string) =>
     database
-      .prepare("SELECT desired_state, observed_state, last_wake_reason FROM hosted_servers WHERE server_id = ?")
+      .prepare(
+        `SELECT desired_state, observed_state, observed_error, last_wake_reason, checkout_session_id
+         FROM hosted_servers WHERE server_id = ?`,
+      )
       .get(serverId);
-  return { database, clock, calls, claims, remote, service, webhook, state };
+  const sandboxCreates = () => boatCalls.filter((call) => call.method === "POST" && call.path === "/sandboxes");
+  return {
+    database,
+    clock,
+    boatCalls,
+    claims,
+    stripe,
+    remote,
+    service,
+    boatWebhook,
+    stripeSync,
+    state,
+    sandboxCreates,
+  };
 }
 
-async function createRunningServer(context: Awaited<ReturnType<typeof setup>>) {
-  const server = await context.service.create(owner, { name: "Cloud one", size: undefined }, "create-key-0000001");
-  await context.service.handleWebhook(context.webhook("sandbox.ready", "ready"));
+type Context = Awaited<ReturnType<typeof setup>>;
+
+async function createPaidServer(context: Context, key = "create-key-0000001") {
+  const { server } = await context.service.create(owner, STARTER, key, RETURN);
+  await context.stripeSync("sub_1", "active", server.serverId);
+  return server;
+}
+
+async function createRunningServer(context: Context) {
+  const server = await createPaidServer(context);
+  await context.service.handleWebhook(context.boatWebhook("sandbox.ready", "ready"));
   await context.remote.registerHost(owner, {
     hostId: server.serverId,
     name: "Cloud one",
@@ -107,155 +168,384 @@ async function createRunningServer(context: Awaited<ReturnType<typeof setup>>) {
 }
 
 describe("hosted servers", () => {
-  it("creates a server only for an allowed account and gives the VM a single-use claim", async () => {
+  it("makes a sandbox only after Stripe confirms the payment, once, with a single-use claim", async () => {
     const context = await setup();
-    try {
-      await expect(context.service.list(stranger)).resolves.toEqual({ available: false, servers: [] });
-      await expect(
-        context.service.create(stranger, { name: "Mine", size: "small" }, "create-key-0000001"),
-      ).rejects.toMatchObject({ status: 403, code: "hosting_unavailable" });
+    await expect(context.service.list(stranger)).resolves.toEqual({ available: false, servers: [] });
+    await expect(context.service.create(stranger, STARTER, "create-key-0000001", RETURN)).rejects.toMatchObject({
+      status: 403,
+      code: "hosting_unavailable",
+    });
 
-      const server = await context.service.create(
-        owner,
-        { name: " Cloud one ", size: undefined },
-        "create-key-0000001",
-      );
-      expect(server).toMatchObject({ name: "Cloud one", size: "small", state: "starting", error: null });
-      const again = await context.service.create(owner, { name: "Cloud one", size: "small" }, "create-key-0000001");
-      expect(again.serverId).toBe(server.serverId);
-      const creates = context.calls.filter((call) => call.path === "/sandboxes");
-      expect(creates).toHaveLength(1);
-      const [create] = creates;
-      expect(create?.headers.get("Idempotency-Key")).toBe(server.serverId);
-      expect(create?.headers.get("Authorization")).toBe("Bearer boat-key");
-      expect(create?.body).toMatchObject({
-        type: "small",
-        from: "openbot-server-test",
-        noEnv: true,
-        ttlSeconds: null,
-        env: { OPENBOT_HOSTED_HOST_ID: server.serverId },
-      });
-      const [claim = ""] = context.claims;
-      expect(JSON.stringify(context.database.prepare("SELECT * FROM hosted_servers").all())).not.toContain(claim);
+    const first = await context.service.create(
+      owner,
+      { ...STARTER, name: " Cloud one " },
+      "create-key-0000001",
+      RETURN,
+    );
+    const { server } = first;
+    expect(server).toMatchObject({ name: "Cloud one", size: "small", plan: "starter", state: "awaiting_payment" });
+    expect(first.checkoutUrl).toBe("https://checkout.stripe.com/c/pay/cs_1");
+    expect(context.sandboxCreates()).toHaveLength(0);
+    expect(Object.fromEntries(context.stripe.checkouts[0] ?? [])).toMatchObject({
+      mode: "subscription",
+      customer: "cus_1",
+      "line_items[0][price]": "price_starter_month",
+      currency: "eur",
+      client_reference_id: server.serverId,
+      success_url: `${ORIGIN}/billing/return`,
+      "subscription_data[metadata][openbot_server_id]": server.serverId,
+      "subscription_data[metadata][openbot_user_id]": "owner",
+    });
 
-      const redeemed = await context.service.redeemClaim(claim);
-      expect(redeemed).toMatchObject({ hostId: server.serverId, name: "Cloud one", user: { id: "owner" } });
-      await expect(
-        new D1AuthRepository(sqliteD1(context.database)).authenticate(redeemed.sessionToken, context.clock.now),
-      ).resolves.toMatchObject({ id: "owner" });
-      await expect(context.service.redeemClaim(claim)).rejects.toMatchObject({ code: "hosted_claim_invalid" });
+    // A repeated submit closes the first page, so only one page can take a payment.
+    const again = await context.service.create(owner, STARTER, "create-key-0000001", RETURN);
+    expect(again.server.serverId).toBe(server.serverId);
+    expect(again.checkoutUrl).toBe("https://checkout.stripe.com/c/pay/cs_2");
+    expect(context.stripe.sessions.get("cs_1")).toBe("expired");
+    expect(context.stripe.customersCreated).toBe(1);
 
-      await context.service.create(owner, { name: "Cloud two", size: "default" }, "create-key-0000002");
-      const secondClaim = context.claims.at(-1) ?? "";
-      context.clock.now += 61 * MINUTE;
-      await expect(context.service.redeemClaim(secondClaim)).rejects.toMatchObject({ code: "hosted_claim_invalid" });
-    } finally {
-      context.database.close();
-    }
+    // Stripe makes the subscription before the payment is done: no sandbox yet.
+    await context.stripeSync("sub_1", "incomplete", server.serverId);
+    expect(context.sandboxCreates()).toHaveLength(0);
+    await context.stripeSync("sub_1", "active", server.serverId);
+    await context.stripeSync("sub_1", "active", server.serverId);
+    const creates = context.sandboxCreates();
+    expect(creates).toHaveLength(1);
+    expect(creates[0]?.headers.get("Idempotency-Key")).toBe(server.serverId);
+    expect(creates[0]?.body).toMatchObject({
+      type: "small",
+      from: "openbot-server-test",
+      env: { OPENBOT_HOSTED_HOST_ID: server.serverId },
+    });
+    expect(context.state(server.serverId)).toMatchObject({ observed_state: "starting", checkout_session_id: null });
+    // A paid page cannot open again.
+    await expect(context.service.checkout(owner, server.serverId, RETURN)).resolves.toMatchObject({
+      checkoutUrl: null,
+    });
+
+    const [claim = ""] = context.claims;
+    expect(JSON.stringify(context.database.prepare("SELECT * FROM hosted_servers").all())).not.toContain(claim);
+    const redeemed = await context.service.redeemClaim(claim);
+    expect(redeemed).toMatchObject({ hostId: server.serverId, name: "Cloud one", user: { id: "owner" } });
+    await expect(
+      new D1AuthRepository(sqliteD1(context.database)).authenticate(redeemed.sessionToken, context.clock.now),
+    ).resolves.toMatchObject({ id: "owner" });
+    await expect(context.service.redeemClaim(claim)).rejects.toMatchObject({ code: "hosted_claim_invalid" });
+
+    // The claim lifetime counts from the payment, not from the create request.
+    const second = await context.service.create(owner, { ...STARTER, plan: "pro" }, "create-key-0000002", RETURN);
+    context.clock.now += 2 * 60 * MINUTE;
+    await context.stripeSync("sub_2", "active", second.server.serverId);
+    expect(context.sandboxCreates().at(-1)?.body).toMatchObject({ type: "large" });
+    const secondClaim = context.claims.at(-1) ?? "";
+    context.clock.now += 61 * MINUTE;
+    await expect(context.service.redeemClaim(secondClaim)).rejects.toMatchObject({ code: "hosted_claim_invalid" });
+  });
+
+  it("gives no sandbox to a server that the paid subscription's account does not own", async () => {
+    const context = await setup();
+    const { server } = await context.service.create(member, STARTER, "create-key-0000001", RETURN);
+    // The owner's customer pays, and the metadata names the member's server.
+    await context.stripeSync("sub_1", "active", server.serverId, "cus_owner");
+    await context.service.tick(context.clock.now + 5 * MINUTE);
+    expect(context.sandboxCreates()).toHaveLength(0);
+    expect(context.state(server.serverId)).toMatchObject({ observed_state: "awaiting_payment" });
+  });
+
+  it("stops a server whose plan ended and keeps it, and starts it again when the plan is renewed", async () => {
+    const context = await setup();
+    const server = await createRunningServer(context);
+    context.database
+      .prepare(
+        `INSERT INTO remote_memberships(membership_id, host_id, user_id, role, status, created_at, updated_at)
+         VALUES ('member-1', ?, 'member', 'member', 'active', 1, 1)`,
+      )
+      .run(server.serverId);
+    const calls = (path: string) => context.boatCalls.filter((call) => call.path === path).length;
+
+    context.clock.now += MINUTE;
+    await context.stripeSync("sub_1", "unpaid", server.serverId);
+    expect(context.state(server.serverId)).toMatchObject({
+      desired_state: "stopped",
+      observed_state: "stopping",
+      observed_error: "plan_ended",
+    });
+    expect(calls("/sandboxes/bx_1/stop")).toBe(1);
+    await expect(context.service.wake(member, server.serverId)).rejects.toMatchObject({
+      status: 402,
+      code: "plan_required",
+    });
+    // An open plan that is not paid gets its payment in the Customer Portal, not a second plan.
+    await expect(context.service.checkout(owner, server.serverId, RETURN)).rejects.toMatchObject({
+      status: 409,
+      code: "hosted_server_payment_due",
+    });
+    await context.stripeSync("sub_1", "canceled", server.serverId);
+    expect(calls("/sandboxes/bx_1/stop")).toBe(1);
+
+    context.clock.now += MINUTE;
+    await context.service.handleWebhook(context.boatWebhook("sandbox.archived", "archived"));
+    await context.service.tick(context.clock.now + 5 * MINUTE);
+    expect(context.state(server.serverId)).toMatchObject({ observed_state: "stopped", observed_error: "plan_ended" });
+    expect(calls("/sandboxes/bx_1/resume")).toBe(0);
+    expect(context.boatCalls.some((call) => call.method === "DELETE")).toBe(false);
+    await expect(context.service.list(owner)).resolves.toMatchObject({
+      servers: [{ serverId: server.serverId, state: "stopped", error: "plan_ended" }],
+    });
+
+    // A cancelled plan is renewed with a new Checkout page.
+    const renewal = await context.service.checkout(owner, server.serverId, RETURN);
+    expect(renewal.checkoutUrl).toMatch(/^https:\/\/checkout\.stripe\.com\//u);
+    context.clock.now += MINUTE;
+    await context.stripeSync("sub_2", "active", server.serverId);
+    expect(calls("/sandboxes/bx_1/resume")).toBe(1);
+    expect(context.state(server.serverId)).toMatchObject({
+      desired_state: "running",
+      observed_state: "waking",
+      observed_error: null,
+    });
+  });
+
+  it("cancels the plan when the owner deletes a paid server, and keeps the server when Stripe fails", async () => {
+    const context = await setup();
+    const server = await createRunningServer(context);
+    context.stripe.failCancel = true;
+    await expect(context.service.delete(owner, server.serverId, "Cloud one")).rejects.toMatchObject({
+      status: 502,
+      code: "hosted_server_billing_failed",
+    });
+    expect(context.state(server.serverId)).toMatchObject({ desired_state: "running", observed_state: "running" });
+    expect(context.boatCalls.some((call) => call.method === "DELETE")).toBe(false);
+
+    context.stripe.failCancel = false;
+    await context.service.delete(owner, server.serverId, "Cloud one");
+    expect(context.stripe.cancelled).toEqual(["sub_1"]);
+    expect(context.boatCalls.find((call) => call.method === "DELETE")?.path).toBe("/sandboxes/bx_1");
+
+    // A payment that finishes after the owner deleted the server is cancelled, and makes no sandbox.
+    const unpaid = await context.service.create(owner, STARTER, "create-key-0000002", RETURN);
+    await context.service.delete(owner, unpaid.server.serverId, "Cloud one");
+    expect(context.stripe.sessions.get("cs_2")).toBe("expired");
+    await context.stripeSync("sub_late", "active", unpaid.server.serverId);
+    expect(context.stripe.cancelled).toEqual(["sub_1", "sub_late"]);
+    expect(context.sandboxCreates()).toHaveLength(1);
+  });
+
+  it("applies a missed payment or plan end on the cron, and removes a server that is not paid in a day", async () => {
+    const context = await setup();
+    const paid = await context.service.create(owner, STARTER, "create-key-0000001", RETURN);
+    const unpaid = await context.service.create(owner, STARTER, "create-key-0000002", RETURN);
+    // The webhook stored the subscription, but the hosting step failed.
+    context.database
+      .prepare(
+        `INSERT INTO billing_subscriptions(
+           stripe_subscription_id, user_id, stripe_customer_id, server_id, plan, interval, currency, status,
+           current_period_end, cancel_at_period_end, updated_at
+         ) VALUES ('sub_1', 'owner', 'cus_1', ?, 'starter', 'month', 'eur', 'active', ?, 0, 1)`,
+      )
+      .run(paid.server.serverId, context.clock.now + 30 * 24 * 60 * MINUTE);
+
+    context.clock.now += 5 * MINUTE;
+    await expect(context.service.tick()).resolves.toMatchObject({ provisioned: 1, abandoned: 0, failed: 0 });
+    expect(context.sandboxCreates()).toHaveLength(1);
+    await context.service.handleWebhook(context.boatWebhook("sandbox.ready", "ready"));
+
+    context.database.exec("UPDATE billing_subscriptions SET status = 'canceled'");
+    context.clock.now += 5 * MINUTE;
+    await expect(context.service.tick()).resolves.toMatchObject({ stopped: 1 });
+    expect(context.state(paid.server.serverId)).toMatchObject({ desired_state: "stopped", observed_state: "stopping" });
+
+    context.clock.now += 24 * 60 * MINUTE;
+    await expect(context.service.tick()).resolves.toMatchObject({ abandoned: 1 });
+    expect(context.state(unpaid.server.serverId)).toMatchObject({
+      desired_state: "deleted",
+      observed_state: "deleted",
+    });
+    // A server with a plan that ended keeps its data.
+    await expect(context.service.list(owner)).resolves.toMatchObject({
+      servers: [{ serverId: paid.server.serverId, state: "stopping" }],
+    });
   });
 
   it("reserves the host ID for its owner and removes the host on deletion", async () => {
     const context = await setup();
-    try {
-      const server = await context.service.create(owner, { name: "Cloud one", size: "small" }, "create-key-0000001");
-      const [claim = ""] = context.claims;
-      const session = await context.service.redeemClaim(claim);
-      const hostInput = { hostId: server.serverId, name: "Cloud one", ownerMembershipId: `${server.serverId}:owner` };
-      await expect(context.remote.registerHost(stranger, hostInput)).rejects.toMatchObject({
-        code: "host_owner_mismatch",
-      });
-      await context.remote.registerHost(owner, hostInput);
+    const server = await createPaidServer(context);
+    const [claim = ""] = context.claims;
+    const session = await context.service.redeemClaim(claim);
+    const hostInput = { hostId: server.serverId, name: "Cloud one", ownerMembershipId: `${server.serverId}:owner` };
+    await expect(context.remote.registerHost(stranger, hostInput)).rejects.toMatchObject({
+      code: "host_owner_mismatch",
+    });
+    await context.remote.registerHost(owner, hostInput);
 
-      await expect(context.service.delete(stranger, server.serverId, "Cloud one")).rejects.toMatchObject({
-        status: 404,
-      });
-      await expect(context.service.delete(owner, server.serverId, "Cloud")).rejects.toMatchObject({
-        code: "hosted_server_confirm_mismatch",
-      });
-      await context.service.delete(owner, server.serverId, "Cloud one");
-      const deletion = context.calls.find((call) => call.method === "DELETE");
-      expect(deletion?.path).toBe("/sandboxes/bx_1");
-      expect(deletion?.headers.get("X-Ascii-Confirm-Delete")).toBe("bx_1");
-      expect(context.database.prepare("SELECT host_id FROM remote_hosts").all()).toEqual([]);
-      await expect(
-        new D1AuthRepository(sqliteD1(context.database)).authenticate(session.sessionToken, context.clock.now),
-      ).resolves.toBeNull();
-      await expect(context.remote.registerHost(owner, hostInput)).rejects.toMatchObject({
-        code: "host_owner_mismatch",
-      });
-      await expect(context.service.list(owner)).resolves.toMatchObject({ servers: [] });
-    } finally {
-      context.database.close();
-    }
+    await expect(context.service.delete(stranger, server.serverId, "Cloud one")).rejects.toMatchObject({
+      status: 404,
+    });
+    await expect(context.service.delete(owner, server.serverId, "Cloud")).rejects.toMatchObject({
+      code: "hosted_server_confirm_mismatch",
+    });
+    await context.service.delete(owner, server.serverId, "Cloud one");
+    const deletion = context.boatCalls.find((call) => call.method === "DELETE");
+    expect(deletion?.path).toBe("/sandboxes/bx_1");
+    expect(deletion?.headers.get("X-Ascii-Confirm-Delete")).toBe("bx_1");
+    expect(context.database.prepare("SELECT host_id FROM remote_hosts").all()).toEqual([]);
+    await expect(
+      new D1AuthRepository(sqliteD1(context.database)).authenticate(session.sessionToken, context.clock.now),
+    ).resolves.toBeNull();
+    await expect(context.remote.registerHost(owner, hostInput)).rejects.toMatchObject({
+      code: "host_owner_mismatch",
+    });
+    await expect(context.service.list(owner)).resolves.toMatchObject({ servers: [] });
   });
 
   it("checks webhook signatures, applies each delivery once, and ignores older events", async () => {
     const context = await setup();
-    try {
-      const server = await context.service.create(owner, { name: "Cloud one", size: "small" }, "create-key-0000001");
-      const forged = context.webhook("sandbox.ready", "ready");
-      await expect(
-        context.service.handleWebhook({ ...forged, signature: `v1=${"0".repeat(64)}` }),
-      ).rejects.toMatchObject({ status: 401 });
-      const stale = context.webhook("sandbox.ready", "ready", { timestamp: context.clock.now - 6 * MINUTE });
-      await expect(context.service.handleWebhook(stale)).rejects.toMatchObject({ status: 401 });
-      expect(context.state(server.serverId)).toMatchObject({ observed_state: "starting" });
+    const server = await createPaidServer(context);
+    const forged = context.boatWebhook("sandbox.ready", "ready");
+    await expect(context.service.handleWebhook({ ...forged, signature: `v1=${"0".repeat(64)}` })).rejects.toMatchObject(
+      { status: 401 },
+    );
+    const stale = context.boatWebhook("sandbox.ready", "ready", { timestamp: context.clock.now - 6 * MINUTE });
+    await expect(context.service.handleWebhook(stale)).rejects.toMatchObject({ status: 401 });
+    expect(context.state(server.serverId)).toMatchObject({ observed_state: "starting" });
 
-      const ready = context.webhook("sandbox.ready", "ready");
-      await context.service.handleWebhook(ready);
-      expect(context.state(server.serverId)).toMatchObject({ observed_state: "running" });
-      const olderError = context.webhook("sandbox.error", null, { createdAt: context.clock.now - MINUTE });
-      await context.service.handleWebhook(olderError);
-      expect(context.state(server.serverId)).toMatchObject({ observed_state: "running" });
+    await context.service.handleWebhook(context.boatWebhook("sandbox.ready", "ready"));
+    expect(context.state(server.serverId)).toMatchObject({ observed_state: "running" });
+    const olderError = context.boatWebhook("sandbox.error", null, { createdAt: context.clock.now - MINUTE });
+    await context.service.handleWebhook(olderError);
+    expect(context.state(server.serverId)).toMatchObject({ observed_state: "running" });
 
-      context.clock.now += MINUTE;
-      const error = context.webhook("sandbox.error", null);
-      await context.service.handleWebhook(error);
-      expect(context.state(server.serverId)).toMatchObject({ observed_state: "error" });
-      context.clock.now += MINUTE;
-      await context.service.handleWebhook(context.webhook("sandbox.ready", "ready"));
-      // The same delivery again changes nothing.
-      await context.service.handleWebhook(error);
-      expect(context.state(server.serverId)).toMatchObject({ observed_state: "running" });
-    } finally {
-      context.database.close();
-    }
+    context.clock.now += MINUTE;
+    const error = context.boatWebhook("sandbox.error", null);
+    await context.service.handleWebhook(error);
+    expect(context.state(server.serverId)).toMatchObject({ observed_state: "error" });
+    context.clock.now += MINUTE;
+    await context.service.handleWebhook(context.boatWebhook("sandbox.ready", "ready"));
+    // The same delivery again changes nothing.
+    await context.service.handleWebhook(error);
+    expect(context.state(server.serverId)).toMatchObject({ observed_state: "running" });
   });
 
   it("starts a server again when the provider stops it, and lets a member start a failed one", async () => {
     const context = await setup();
-    try {
-      const server = await createRunningServer(context);
-      context.database
-        .prepare(
-          `INSERT INTO remote_memberships(membership_id, host_id, user_id, role, status, created_at, updated_at)
-           VALUES ('member-1', ?, 'member', 'member', 'active', 1, 1)`,
-        )
-        .run(server.serverId);
-      const resumes = () => context.calls.filter((call) => call.path === "/sandboxes/bx_1/resume").length;
+    const server = await createRunningServer(context);
+    context.database
+      .prepare(
+        `INSERT INTO remote_memberships(membership_id, host_id, user_id, role, status, created_at, updated_at)
+         VALUES ('member-1', ?, 'member', 'member', 'active', 1, 1)`,
+      )
+      .run(server.serverId);
+    const resumes = () => context.boatCalls.filter((call) => call.path === "/sandboxes/bx_1/resume").length;
 
-      context.clock.now += MINUTE;
-      await context.service.handleWebhook(context.webhook("sandbox.ready", "archiving"));
-      await expect(context.service.wake(stranger, server.serverId)).rejects.toMatchObject({ status: 404 });
-      await expect(context.service.wake(member, server.serverId)).resolves.toMatchObject({ state: "stopping" });
-      expect(resumes()).toBe(0);
+    context.clock.now += MINUTE;
+    await context.service.handleWebhook(context.boatWebhook("sandbox.ready", "archiving"));
+    await expect(context.service.wake(stranger, server.serverId)).rejects.toMatchObject({ status: 404 });
+    await expect(context.service.wake(member, server.serverId)).resolves.toMatchObject({ state: "stopping" });
+    expect(resumes()).toBe(0);
 
-      context.clock.now += MINUTE;
-      await context.service.handleWebhook(context.webhook("sandbox.archived", "archived"));
-      expect(resumes()).toBe(1);
-      expect(context.state(server.serverId)).toMatchObject({
-        desired_state: "running",
-        observed_state: "waking",
-        last_wake_reason: "restart",
-      });
+    context.clock.now += MINUTE;
+    await context.service.handleWebhook(context.boatWebhook("sandbox.archived", "archived"));
+    expect(resumes()).toBe(1);
+    expect(context.state(server.serverId)).toMatchObject({
+      desired_state: "running",
+      observed_state: "waking",
+      last_wake_reason: "restart",
+    });
 
-      context.clock.now += MINUTE;
-      await context.service.handleWebhook(context.webhook("sandbox.error", null));
-      await expect(context.service.wake(member, server.serverId)).resolves.toMatchObject({ state: "waking" });
-      expect(resumes()).toBe(2);
-      expect(context.state(server.serverId)).toMatchObject({ last_wake_reason: "message" });
-    } finally {
-      context.database.close();
-    }
+    context.clock.now += MINUTE;
+    await context.service.handleWebhook(context.boatWebhook("sandbox.error", null));
+    await expect(context.service.wake(member, server.serverId)).resolves.toMatchObject({ state: "waking" });
+    expect(resumes()).toBe(2);
+    expect(context.state(server.serverId)).toMatchObject({ last_wake_reason: "message" });
   });
 });
+
+/** The Stripe API calls that hosted servers make. Customer `cus_1` belongs to the owner. */
+class FakeStripe {
+  readonly subscriptions = new Map<string, unknown>();
+  /** Checkout session ID → status. */
+  readonly sessions = new Map<string, string>();
+  readonly checkouts: URLSearchParams[] = [];
+  readonly cancelled: string[] = [];
+  customersCreated = 0;
+  failCancel = false;
+
+  async fetch(input: string, init: RequestInit): Promise<Response> {
+    const url = new URL(input);
+    const method = init.method ?? "GET";
+    const body = new URLSearchParams(typeof init.body === "string" ? init.body : "");
+    if (method === "GET" && url.pathname === "/v1/prices") return Response.json({ data: prices() });
+    if (method === "POST" && url.pathname === "/v1/customers") {
+      this.customersCreated += 1;
+      return Response.json({ id: `cus_${this.customersCreated}` });
+    }
+    if (method === "POST" && url.pathname === "/v1/checkout/sessions") {
+      this.checkouts.push(body);
+      const id = `cs_${this.checkouts.length}`;
+      this.sessions.set(id, "open");
+      return Response.json({ id, url: `https://checkout.stripe.com/c/pay/${id}`, status: "open" });
+    }
+    const expire = /^\/v1\/checkout\/sessions\/([^/]+)\/expire$/u.exec(url.pathname)?.[1];
+    if (method === "POST" && expire) {
+      if (this.sessions.get(expire) !== "open")
+        return Response.json({ error: { type: "invalid_request_error" } }, { status: 400 });
+      this.sessions.set(expire, "expired");
+      return Response.json({ id: expire, url: null, status: "expired" });
+    }
+    const session = /^\/v1\/checkout\/sessions\/([^/]+)$/u.exec(url.pathname)?.[1];
+    if (method === "GET" && session) {
+      return Response.json({ id: session, url: null, status: this.sessions.get(session) ?? null });
+    }
+    const subscriptionId = /^\/v1\/subscriptions\/([^/]+)$/u.exec(url.pathname)?.[1];
+    const stored = subscriptionId ? this.subscriptions.get(subscriptionId) : undefined;
+    if (method === "GET" && subscriptionId) {
+      return stored
+        ? Response.json(stored)
+        : Response.json({ error: { type: "invalid_request_error" } }, { status: 404 });
+    }
+    if (method === "DELETE" && subscriptionId && isDynamicRecord(stored)) {
+      if (this.failCancel) return Response.json({ error: { type: "api_error" } }, { status: 500 });
+      this.cancelled.push(subscriptionId);
+      const canceled = { ...stored, status: "canceled" };
+      this.subscriptions.set(subscriptionId, canceled);
+      return Response.json(canceled);
+    }
+    throw new Error(`Unexpected Stripe request ${method} ${url.pathname}`);
+  }
+}
+
+function prices() {
+  return BILLING_PLAN_IDS.flatMap((plan) =>
+    BILLING_INTERVALS.map((interval) => ({
+      id: `price_${plan}_${interval}`,
+      lookup_key: `openbot_${plan}_${interval}`,
+      currency: "eur",
+      unit_amount: 2_000,
+      currency_options: Object.fromEntries(BILLING_CURRENCIES.map((currency) => [currency, { unit_amount: 2_000 }])),
+    })),
+  );
+}
+
+function subscription(id: string, status: string, serverId: string, customer: string, now: number) {
+  return {
+    id,
+    customer,
+    status,
+    currency: "eur",
+    cancel_at_period_end: false,
+    metadata: { openbot_user_id: owner.id, openbot_server_id: serverId },
+    items: {
+      data: [
+        {
+          current_period_end: Math.floor(now / 1_000) + 30 * 86_400,
+          price: {
+            id: "price_starter_month",
+            lookup_key: "openbot_starter_month",
+            currency: "eur",
+            unit_amount: 2_000,
+          },
+        },
+      ],
+    },
+  };
+}

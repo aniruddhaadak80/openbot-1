@@ -44,6 +44,7 @@ const Servers = createSimpleContext({
     const [servers, setServers] = createSignal<ServerSummary[]>([]);
     const [hostStatus, setHostStatus] = createSignal<HostStatus>(FALLBACK_HOST_STATUS);
     const [joinServerOpen, setJoinServerOpen] = createSignal(false);
+    const [addServerOpen, setAddServerOpen] = createSignal(false);
     const [serverLoadRequest, setServerLoadRequest] = createSignal<{ serverId: string; nonce: number } | null>(null);
     let loadRequestNonce = 0;
     let pendingCompatibilityRetryServerId: string | null = null;
@@ -235,6 +236,8 @@ const Servers = createSimpleContext({
       setHostStatus,
       joinServerOpen,
       setJoinServerOpen,
+      addServerOpen,
+      setAddServerOpen,
       reorderServers,
       setServerMuted,
       setServerNotificationLevel,

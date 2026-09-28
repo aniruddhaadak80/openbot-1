@@ -1,12 +1,5 @@
-.hosted-servers-create {
+.hosted-servers-add {
   display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: var(--openbot-space-2);
-}
-
-.hosted-servers-create > .ui-field {
-  flex: 1 1 220px;
 }
 
 .hosted-servers-list .hosted-servers-row {

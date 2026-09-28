@@ -1,29 +1,15 @@
-import { DEFAULT_TEAM_MEMBER_LIMIT } from "@openbot/contracts/input-limits";
 import type { ServerSummary } from "@openbot/contracts/ipc";
 import { Heading, Text } from "@openbot/ui";
 import { AddServerDialog, type HostedServerSetupStatus } from "@openbot/ui/features/servers/AddServerDialog";
-import type { HostedServerPlan } from "@openbot/ui/features/servers/HostedServerPricing";
+import { hostedServerPlansFromCatalog } from "@openbot/ui/features/servers/HostedServerPricing";
 import { ServerRail } from "@openbot/ui/features/servers/ServerRail";
 import { createMemo, createSignal, onCleanup, Show } from "solid-js";
 import type { Meta, StoryObj } from "storybook-solidjs-vite";
+import { MOCK_HOSTED_SERVER_CATALOG } from "../src/preview/mock-hosted-servers";
 import { STORY_SERVERS } from "./fixtures";
 
-/**
- * Draft prices for design review. The machine sizes, speed factors and member limits are not
- * final. Starter has the default member limit of every host. Each price divides by 5, so the
- * yearly price (20% less) is a whole number.
- */
-const PLANS: HostedServerPlan[] = [
-  {
-    id: "starter",
-    monthlyPrice: { EUR: 20, USD: 25, PLN: 90 },
-    diskGb: 12,
-    memberLimit: DEFAULT_TEAM_MEMBER_LIMIT,
-    relativeSpeed: 1,
-  },
-  { id: "standard", monthlyPrice: { EUR: 50, USD: 60, PLN: 220 }, diskGb: 50, memberLimit: 10, relativeSpeed: 2 },
-  { id: "pro", monthlyPrice: { EUR: 100, USD: 120, PLN: 440 }, diskGb: 100, memberLimit: 25, relativeSpeed: 4 },
-];
+/** The plans of the preview catalog, which has the Stripe sandbox prices. */
+const PLANS = hostedServerPlansFromCatalog(MOCK_HOSTED_SERVER_CATALOG);
 
 /** How long each fake setup step takes, so the progress is easy to watch. */
 const STEP_MS = 5_000;
@@ -36,8 +22,9 @@ interface FlowProps {
 }
 
 /**
- * The server rail with a working plus button. Create a hosted server; the new server is added to
- * the rail. Nothing leaves the browser: every call is fake.
+ * The server rail with a working plus button. Create a hosted server: the fake payment page
+ * "confirms" after one step, then the setup runs and the new server is added to the rail. Nothing
+ * leaves the browser: every call is fake.
  */
 function AddServerFlow(props: FlowProps) {
   const [servers, setServers] = createSignal<ServerSummary[]>(STORY_SERVERS);
@@ -61,8 +48,9 @@ function AddServerFlow(props: FlowProps) {
     clearTimers();
     attempts += 1;
     const fail = props.failFirstTry && attempts === 1;
-    setSetupStatus("creating");
+    setSetupStatus(attempts === 1 ? "payment" : "creating");
     const steps: HostedServerSetupStatus[] = fail ? ["starting", "error"] : ["starting", "connecting", "ready"];
+    if (attempts === 1) steps.unshift("creating");
     timers = steps.map((status, index) => window.setTimeout(() => setSetupStatus(status), STEP_MS * (index + 1)));
   }
 
@@ -119,6 +107,7 @@ function AddServerFlow(props: FlowProps) {
             return { serverId: id, name };
           }}
           onRetry={runSetup}
+          onOpenPayment={() => new Promise((resolve) => window.setTimeout(resolve, 700))}
           onOpenServer={() =>
             addServer({
               ...serverDefaults(),

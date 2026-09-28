@@ -1465,9 +1465,14 @@ holds only the plan IDs, storage and lookup keys. The amounts are six Stripe Pri
 keys `openbot_{plan}_{interval}`. `bun run api:stripe:bootstrap` (`scripts/stripe-bootstrap.ts`)
 creates them and the Customer Portal settings.
 
-- This page does not start a plan. The flow that makes a server starts the subscription, and must
-  set the subscription metadata `openbot_user_id` and `openbot_server_id` (`BILLING_METADATA`). The
-  webhook links a new Stripe customer to the account from `openbot_user_id`. It never moves a known
+- The add server dialog starts a plan. The hosting service
+  (`apps/auth-api/src/server/hosted-billing.ts`) makes the Stripe customer before the Checkout, so
+  two open Checkouts use one customer. The Checkout sets the subscription metadata
+  `openbot_user_id` and `openbot_server_id` (`BILLING_METADATA`). The billing service calls the
+  `onSubscriptionSynced` hook after each subscription sync; the hosting side uses it to provision,
+  stop and resume servers, so billing does not know about boat. See
+  [hosted servers](hosted-servers.md#lifecycle). The webhook links a new Stripe customer to the
+  account from `openbot_user_id`. It never moves a known
   customer to another account, and it skips a subscription that names no account.
 - Desktop Settings → Billing and the web Billing dialog render `@openbot/ui/features/billing`: one
   row for each open plan, with the server name, the plan, its price, and a menu to change or cancel
@@ -1477,7 +1482,8 @@ creates them and the Customer Portal settings.
   account button opens the Customer Portal for the payment method and invoices.
 - Desktop calls the `billing` IPC group; the main process gets a Customer Portal URL from the Worker,
   checks that it is a `billing.stripe.com` page, and opens it with `shell.openExternal`. The IPC takes
-  no URL. The web client does the same check before `location.assign`.
+  no URL. The web client does the same check before `location.assign`. Checkout URLs get the same
+  check for `checkout.stripe.com` (`isStripeCheckoutUrl`).
 - The change and cancel actions open the Portal flow of one subscription. The Worker first checks
   that the subscription belongs to the account.
 - The server name comes only from a `remote_hosts` row that the same account owns. A plan whose

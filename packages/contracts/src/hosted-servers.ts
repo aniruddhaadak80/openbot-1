@@ -1,18 +1,36 @@
-import { isBoolean, isDynamicRecord, isOneOf, isString } from "./runtime-values";
+import {
+  BILLING_CURRENCIES,
+  BILLING_INTERVALS,
+  BILLING_PLAN_IDS,
+  type BillingCurrency,
+  type BillingInterval,
+  type BillingPlanId,
+  isBillingAmount,
+  isStripeCheckoutUrl,
+} from "./billing";
+import { isBoolean, isDynamicRecord, isNumber, isOneOf, isString } from "./runtime-values";
 
-/** The machine sizes that a user can select. The account server maps each size to a provider type. */
+/** The provider machine sizes, from the boat machine table (docs.boat.dev/machines). */
 export const HOSTED_SERVER_SIZES = {
   small: { vcpu: 2, memoryGb: 4, diskGb: 12 },
   default: { vcpu: 4, memoryGb: 8, diskGb: 50 },
+  large: { vcpu: 8, memoryGb: 16, diskGb: 125 },
 } as const;
 
 export type HostedServerSize = keyof typeof HOSTED_SERVER_SIZES;
 
-export const HOSTED_SERVER_SIZE_NAMES = ["small", "default"] as const satisfies readonly HostedServerSize[];
+export const HOSTED_SERVER_SIZE_NAMES = ["small", "default", "large"] as const satisfies readonly HostedServerSize[];
 
-export const DEFAULT_HOSTED_SERVER_SIZE: HostedServerSize = "small";
+/** The machine of each plan. The plan decides the size: a user never selects a size. */
+export const HOSTED_PLAN_SIZE: Readonly<Record<BillingPlanId, HostedServerSize>> = {
+  starter: "small",
+  standard: "default",
+  pro: "large",
+};
 
 export const HOSTED_SERVER_STATES = [
+  /** The row exists, and the account server waits for Stripe to confirm the first payment. */
+  "awaiting_payment",
   "creating",
   "starting",
   "running",
@@ -25,8 +43,17 @@ export const HOSTED_SERVER_STATES = [
 
 export type HostedServerState = (typeof HOSTED_SERVER_STATES)[number];
 
-/** The reason codes for a server in the error state. They never contain provider text. */
-export const HOSTED_SERVER_ERRORS = ["provider_error", "provider_billing", "provider_limit", "start_failed"] as const;
+/**
+ * The reason codes for a server in the error state, or for a server that stopped. They never contain
+ * provider text. `plan_ended`: the plan was cancelled or not paid, so the server stopped. Its data stays.
+ */
+export const HOSTED_SERVER_ERRORS = [
+  "provider_error",
+  "provider_billing",
+  "provider_limit",
+  "start_failed",
+  "plan_ended",
+] as const;
 
 export type HostedServerError = (typeof HOSTED_SERVER_ERRORS)[number];
 
@@ -37,6 +64,9 @@ export interface HostedServerSummary {
   serverId: string;
   name: string;
   size: HostedServerSize;
+  plan: BillingPlanId;
+  interval: BillingInterval;
+  currency: BillingCurrency;
   state: HostedServerState;
   error: HostedServerError | null;
   createdAt: string;
@@ -44,7 +74,7 @@ export interface HostedServerSummary {
 }
 
 export interface HostedServerList {
-  /** False when this account cannot create hosted servers. */
+  /** False when this account cannot create hosted servers, or when the account server has no billing. */
   available: boolean;
   servers: HostedServerSummary[];
 }
@@ -71,6 +101,9 @@ export function parseHostedServerSummary(value: unknown): HostedServerSummary | 
     !isString(value.serverId) ||
     !isString(value.name) ||
     !isHostedServerSize(value.size) ||
+    !isOneOf(BILLING_PLAN_IDS, value.plan) ||
+    !isOneOf(BILLING_INTERVALS, value.interval) ||
+    !isOneOf(BILLING_CURRENCIES, value.currency) ||
     !isHostedServerState(value.state) ||
     !(value.error === null || isOneOf(HOSTED_SERVER_ERRORS, value.error)) ||
     !isString(value.createdAt) ||
@@ -82,6 +115,9 @@ export function parseHostedServerSummary(value: unknown): HostedServerSummary | 
     serverId: value.serverId,
     name: value.name,
     size: value.size,
+    plan: value.plan,
+    interval: value.interval,
+    currency: value.currency,
     state: value.state,
     error: value.error,
     createdAt: value.createdAt,
@@ -131,9 +167,33 @@ export function parseHostedServerClaim(value: unknown): HostedServerClaim | null
 
 export interface CreateHostedServerInput {
   name: string;
-  size: HostedServerSize;
+  plan: BillingPlanId;
+  interval: BillingInterval;
+  currency: BillingCurrency;
   /** One ID for each opened create form, so a repeated submit does not create a second server. */
   requestId: string;
+}
+
+/**
+ * The account server's answer to a create or a new payment page. `checkoutUrl` is the Stripe Checkout
+ * page, or null when the server needs no payment page (its plan started already).
+ */
+export interface HostedServerCheckout {
+  server: HostedServerSummary;
+  checkoutUrl: string | null;
+}
+
+/** One plan as the create dialog shows it. Amounts are in the minor unit of the currency. */
+export interface HostedServerCatalogPlan {
+  id: BillingPlanId;
+  diskGb: number;
+  memberLimit: number;
+  relativeSpeed: number;
+  prices: Record<BillingCurrency, Record<BillingInterval, number>>;
+}
+
+export interface HostedServerCatalog {
+  plans: HostedServerCatalogPlan[];
 }
 
 export interface DeleteHostedServerInput {
@@ -146,11 +206,66 @@ const REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/u;
 
 /** Returns null for a value that is not a valid create request. */
 export function parseCreateHostedServerInput(value: unknown): CreateHostedServerInput | null {
-  if (!isDynamicRecord(value) || !isString(value.name) || !isHostedServerSize(value.size)) return null;
+  if (
+    !isDynamicRecord(value) ||
+    !isString(value.name) ||
+    !isOneOf(BILLING_PLAN_IDS, value.plan) ||
+    !isOneOf(BILLING_INTERVALS, value.interval) ||
+    !isOneOf(BILLING_CURRENCIES, value.currency)
+  ) {
+    return null;
+  }
   const name = value.name.trim();
   if (!name || name.length > HOSTED_SERVER_NAME_MAX_LENGTH || /\p{Cc}/u.test(name)) return null;
   if (!isString(value.requestId) || !REQUEST_ID_PATTERN.test(value.requestId)) return null;
-  return { name, size: value.size, requestId: value.requestId };
+  return { name, plan: value.plan, interval: value.interval, currency: value.currency, requestId: value.requestId };
+}
+
+/** Returns null for a value that is not a checkout answer, or whose URL is not a Stripe Checkout page. */
+export function parseHostedServerCheckout(value: unknown): HostedServerCheckout | null {
+  if (!isDynamicRecord(value)) return null;
+  const server = parseHostedServerSummary(value.server);
+  if (!server || !(value.checkoutUrl === null || isStripeCheckoutUrl(value.checkoutUrl))) return null;
+  return { server, checkoutUrl: value.checkoutUrl };
+}
+
+function parsePlanPrices(value: unknown): HostedServerCatalogPlan["prices"] | null {
+  if (!isDynamicRecord(value)) return null;
+  const prices: Partial<HostedServerCatalogPlan["prices"]> = {};
+  for (const currency of BILLING_CURRENCIES) {
+    const entry = value[currency];
+    if (!isDynamicRecord(entry) || !isBillingAmount(entry.month) || !isBillingAmount(entry.year)) return null;
+    prices[currency] = { month: entry.month, year: entry.year };
+  }
+  const { eur, usd, pln } = prices;
+  return eur && usd && pln ? { eur, usd, pln } : null;
+}
+
+/** Returns null for a value that is not a plan catalog. */
+export function parseHostedServerCatalog(value: unknown): HostedServerCatalog | null {
+  if (!isDynamicRecord(value) || !Array.isArray(value.plans)) return null;
+  const plans: HostedServerCatalogPlan[] = [];
+  for (const entry of value.plans) {
+    if (
+      !isDynamicRecord(entry) ||
+      !isOneOf(BILLING_PLAN_IDS, entry.id) ||
+      !isNumber(entry.diskGb) ||
+      !isNumber(entry.memberLimit) ||
+      !isNumber(entry.relativeSpeed)
+    ) {
+      return null;
+    }
+    const prices = parsePlanPrices(entry.prices);
+    if (!prices) return null;
+    plans.push({
+      id: entry.id,
+      diskGb: entry.diskGb,
+      memberLimit: entry.memberLimit,
+      relativeSpeed: entry.relativeSpeed,
+      prices,
+    });
+  }
+  return { plans };
 }
 
 /** Returns null for a value that is not a valid delete request. */

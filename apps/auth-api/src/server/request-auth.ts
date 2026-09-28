@@ -2,10 +2,11 @@ import { env, waitUntil } from "cloudflare:workers";
 import { AgentMarketplace, AgentMarketplaceError } from "./agent-marketplace";
 import { AgentTemplates } from "./agent-templates";
 import { AuthService, AuthServiceError } from "./auth-service";
-import { BillingError, BillingService } from "./billing-service";
+import { BillingError, type BillingService } from "./billing-service";
 import { D1AuthRepository } from "./d1-auth-repository";
 import { createEmailCodeDelivery, createTeamInviteEmailDelivery } from "./email-delivery";
-import { HostedServerService, HostedServerServiceError } from "./hosted-server-service";
+import { createHostedBilling } from "./hosted-billing";
+import { type HostedServerService, HostedServerServiceError } from "./hosted-server-service";
 import { HostedSiteInputError } from "./hosted-site-contract";
 import { enforceHostedSiteReportRateLimit as enforceReportRateLimit } from "./hosted-site-request-policy";
 import { HostedSiteService } from "./hosted-site-service";
@@ -72,15 +73,7 @@ export function requestHostedSiteService(): HostedSiteService {
 
 /** The billing service, or null when this deployment has no Stripe key. */
 export function requestBillingService(): BillingService | null {
-  const bindings = requireWorkerBindings(env);
-  const secretKey = bindings.STRIPE_SECRET_KEY?.trim();
-  if (!secretKey) return null;
-  return new BillingService({
-    database: bindings.DB,
-    secretKey,
-    webhookSecret: bindings.STRIPE_WEBHOOK_SECRET?.trim() || null,
-    fetch: (input, init) => fetch(input, init),
-  });
+  return requestHostedBilling().billing;
 }
 
 export function billingErrorResponse(error: unknown): Response {
@@ -174,8 +167,12 @@ export function requestRemoteControlPlane(): RemoteControlPlane {
 }
 
 export function requestHostedServerService(): HostedServerService {
+  return requestHostedBilling().hosting;
+}
+
+function requestHostedBilling() {
   const bindings = requireWorkerBindings(env);
-  return new HostedServerService(bindings, {
+  return createHostedBilling(bindings, {
     removeHost: (ownerUserId, hostId) =>
       new RemoteControlPlane(bindings, { schedule: waitUntil }).deleteHost(ownerUserId, hostId),
   });
@@ -183,6 +180,7 @@ export function requestHostedServerService(): HostedServerService {
 
 export function hostedServerErrorResponse(error: unknown): Response {
   if (error instanceof HostedServerServiceError) return apiError(error.status, error.code, error.message);
+  if (error instanceof BillingError) return apiError(error.status, error.code, error.message);
   if (error instanceof HostedSiteInputError) return apiError(error.status, error.code, error.message);
   return remoteControlPlaneErrorResponse(error);
 }

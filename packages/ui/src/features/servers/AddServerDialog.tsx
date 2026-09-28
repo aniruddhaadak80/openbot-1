@@ -29,8 +29,11 @@ import {
   hostedPriceLength,
 } from "./HostedServerPricing";
 
-/** What the consumer reports about the new server after `onCreate` resolves. */
-export type HostedServerSetupStatus = "creating" | "starting" | "connecting" | "ready" | "error";
+/**
+ * What the consumer reports about the new server after `onCreate` resolves. `payment`: the server
+ * waits for the first payment in the browser. The setup starts when Stripe confirms it.
+ */
+export type HostedServerSetupStatus = "payment" | "creating" | "starting" | "connecting" | "ready" | "error";
 
 export interface CreateHostedServerInput {
   plan: HostedServerPlanId;
@@ -54,13 +57,23 @@ interface AddServerDialogProps {
   currency?: HostedCurrency | undefined;
   /** Null until the consumer has a server to report on. */
   setupStatus: HostedServerSetupStatus | null;
+  /**
+   * A server that the user created before, such as after a return from the payment page. The
+   * dialog opens on its setup.
+   */
+  resume?: CreatedHostedServer | undefined;
   onClose: () => void;
-  /** For macOS, a Mac mini, or company plans. The consumer opens its contact page or email. */
-  onContactUs: () => void;
+  /**
+   * For macOS, a Mac mini, or company plans. The consumer opens its contact page or email. Without
+   * it, the dialog does not show the "Contact us" footer.
+   */
+  onContactUs?: (() => void) | undefined;
   /** The consumer names the server, so the user does not have to. The logo uses the ID as its seed, as the rail does. */
   onCreate: (input: CreateHostedServerInput) => Promise<CreatedHostedServer>;
   onRetry: () => void;
   onOpenServer: () => void;
+  /** Opens the payment page again, for the `payment` status. */
+  onOpenPayment: () => Promise<void>;
 }
 
 type Step = "pricing" | "progress";
@@ -111,12 +124,14 @@ const CONFETTI_PIECES = 56;
  */
 export function AddServerDialog(props: AddServerDialogProps) {
   const { t, errorMessage, format } = useText();
-  const [step, setStep] = createSignal<Step>("pricing");
+  const [step, setStep] = createSignal<Step>(untrack(() => props.resume) ? "progress" : "pricing");
   const [billing, setBilling] = createSignal<HostedServerBilling>("yearly");
   const [currency, setCurrency] = createSignal<HostedCurrency>(untrack(() => props.currency) ?? guessHostedCurrency());
   const [pendingPlan, setPendingPlan] = createSignal<HostedServerPlanId | null>(null);
   const [createError, setCreateError] = createSignal<string | null>(null);
-  const [created, setCreated] = createSignal<CreatedHostedServer | null>(null);
+  const [created, setCreated] = createSignal<CreatedHostedServer | null>(untrack(() => props.resume) ?? null);
+  const [paymentPending, setPaymentPending] = createSignal(false);
+  const [paymentError, setPaymentError] = createSignal<string | null>(null);
   const [rendered, setRendered] = createSignal(true);
   const [opened, setOpened] = createSignal(false);
   const [closing, setClosing] = createSignal(false);
@@ -131,7 +146,9 @@ export function AddServerDialog(props: AddServerDialogProps) {
   const setupIndex = () => (props.setupStatus ? SETUP_ORDER.indexOf(props.setupStatus) : 0);
   const serverName = () => created()?.name ?? "";
 
-  const running = () => props.setupStatus !== "ready" && props.setupStatus !== "error";
+  const paying = () => props.setupStatus === "payment";
+  // The payment is not a setup step: no step runs until Stripe confirms it.
+  const running = () => props.setupStatus !== "ready" && props.setupStatus !== "error" && !paying();
   // The error status does not tell which step failed, so keep the last step that ran.
   const [currentIndex, setCurrentIndex] = createSignal(0);
   createEffect(setupIndex, (index) => {
@@ -151,13 +168,15 @@ export function AddServerDialog(props: AddServerDialogProps) {
   );
   const detail = (): AppTextKey | undefined => setupStep(currentIndex()).details[detailIndex()];
   const stepState = (index: number) =>
-    props.setupStatus === "ready" || index < currentIndex()
-      ? "done"
-      : index > currentIndex()
-        ? "pending"
-        : props.setupStatus === "error"
-          ? "failed"
-          : "active";
+    paying()
+      ? "pending"
+      : props.setupStatus === "ready" || index < currentIndex()
+        ? "done"
+        : index > currentIndex()
+          ? "pending"
+          : props.setupStatus === "error"
+            ? "failed"
+            : "active";
 
   onSettled(() => {
     const frame = window.requestAnimationFrame(() => setOpened(true));
@@ -184,6 +203,19 @@ export function AddServerDialog(props: AddServerDialogProps) {
       setCreateError(errorMessage(cause, t("settings.hostedServers.createFailed")));
     } finally {
       setPendingPlan(null);
+    }
+  }
+
+  async function openPayment(): Promise<void> {
+    if (paymentPending()) return;
+    setPaymentPending(true);
+    setPaymentError(null);
+    try {
+      await props.onOpenPayment();
+    } catch (cause) {
+      setPaymentError(errorMessage(cause, t("server.hosted.paymentFailed")));
+    } finally {
+      setPaymentPending(false);
     }
   }
 
@@ -262,19 +294,23 @@ export function AddServerDialog(props: AddServerDialogProps) {
                       onChoose={(plan) => void create(plan)}
                     />
 
-                    <footer class="add-server-custom">
-                      <div class="add-server-custom-text">
-                        <Text as="p" variant="label">
-                          {t("server.add.custom.title")}
-                        </Text>
-                        <Text as="p" tone="muted">
-                          {t("server.add.custom.description")}
-                        </Text>
-                      </div>
-                      <Button variant="outline" size="sm" disabled={creating()} onClick={props.onContactUs}>
-                        {t("server.add.custom.action")}
-                      </Button>
-                    </footer>
+                    <Show when={props.onContactUs}>
+                      {(onContactUs) => (
+                        <footer class="add-server-custom">
+                          <div class="add-server-custom-text">
+                            <Text as="p" variant="label">
+                              {t("server.add.custom.title")}
+                            </Text>
+                            <Text as="p" tone="muted">
+                              {t("server.add.custom.description")}
+                            </Text>
+                          </div>
+                          <Button variant="outline" size="sm" disabled={creating()} onClick={() => onContactUs()()}>
+                            {t("server.add.custom.action")}
+                          </Button>
+                        </footer>
+                      )}
+                    </Show>
 
                     <Show when={createError()}>
                       {(message) => (
@@ -339,6 +375,7 @@ export function AddServerDialog(props: AddServerDialogProps) {
                             {t("server.hosted.readyTitle", { name: serverName() })}
                           </Match>
                           <Match when={props.setupStatus === "error"}>{t("server.hosted.failedTitle")}</Match>
+                          <Match when={paying()}>{t("server.hosted.paymentTitle")}</Match>
                         </Switch>
                       </Heading>
                       <Show
@@ -361,19 +398,50 @@ export function AddServerDialog(props: AddServerDialogProps) {
                         <Text tone="muted" role={props.setupStatus === "error" ? "alert" : undefined}>
                           {props.setupStatus === "ready"
                             ? t("server.hosted.readyDescription")
-                            : t("server.hosted.failedDescription")}
+                            : paying()
+                              ? t("server.hosted.paymentDescription")
+                              : t("server.hosted.failedDescription")}
                         </Text>
                       </Show>
                     </header>
 
                     <Show when={!running()}>
                       <footer class="join-server-actions">
+                        <Show when={paymentError()}>
+                          {(message) => (
+                            <Alert class="join-server-alert" tone="danger" role="alert">
+                              <AlertIcon>
+                                <OctagonX />
+                              </AlertIcon>
+                              <AlertContent>
+                                <AlertTitle>{t("server.hosted.paymentFailed")}</AlertTitle>
+                                <AlertDescription>{message()}</AlertDescription>
+                              </AlertContent>
+                            </Alert>
+                          )}
+                        </Show>
                         <Show
                           when={props.setupStatus === "ready"}
                           fallback={
-                            <Button size="lg" fullWidth onClick={props.onRetry}>
-                              {t("server.hosted.tryAgain")}
-                            </Button>
+                            <Show
+                              when={paying()}
+                              fallback={
+                                <Button size="lg" fullWidth onClick={props.onRetry}>
+                                  {t("server.hosted.tryAgain")}
+                                </Button>
+                              }
+                            >
+                              <Button
+                                variant="outline"
+                                size="lg"
+                                fullWidth
+                                loading={paymentPending()}
+                                loadingLabel={t("server.hosted.openingPayment")}
+                                onClick={() => void openPayment()}
+                              >
+                                {t("server.hosted.openPayment")}
+                              </Button>
+                            </Show>
                           }
                         >
                           <Button

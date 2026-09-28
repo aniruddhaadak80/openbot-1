@@ -1,3 +1,4 @@
+import { DEFAULT_TEAM_MEMBER_LIMIT } from "./input-limits";
 import { isBoolean, isDynamicRecord, isNumber, isOneOf, isString } from "./runtime-values";
 
 export type BillingPlanId = "starter" | "standard" | "pro";
@@ -31,13 +32,17 @@ export const BILLING_SUBSCRIPTION_STATUSES: readonly BillingSubscriptionStatus[]
 export interface BillingPlan {
   id: BillingPlanId;
   storageGb: number;
+  /** The number of active members that the plan shows. Not enforced yet: every host has the default limit. */
+  memberLimit: number;
+  /** The speed of the plan's machine, where Starter is 1. */
+  relativeSpeed: number;
 }
 
-/** The storage of each plan. The amounts are Stripe Prices, not code. */
+/** The storage, members and speed of each plan. The amounts are Stripe Prices, not code. */
 export const BILLING_PLANS: readonly BillingPlan[] = [
-  { id: "starter", storageGb: 12 },
-  { id: "standard", storageGb: 50 },
-  { id: "pro", storageGb: 100 },
+  { id: "starter", storageGb: 12, memberLimit: DEFAULT_TEAM_MEMBER_LIMIT, relativeSpeed: 1 },
+  { id: "standard", storageGb: 50, memberLimit: 10, relativeSpeed: 2 },
+  { id: "pro", storageGb: 100, memberLimit: 25, relativeSpeed: 4 },
 ];
 
 /**
@@ -179,17 +184,24 @@ export function parseBillingPortalRequest(value: unknown): BillingPortalRequest 
   return null;
 }
 
-const STRIPE_HOSTS = new Set(["billing.stripe.com"]);
-
-/** True only for an https Customer Portal page. Clients open no other billing URL. */
-export function isStripeHostedUrl(value: unknown): value is string {
+function isHttpsPageOn(value: unknown, hostname: string): value is string {
   if (!isString(value)) return false;
   try {
     const url = new URL(value);
-    return url.protocol === "https:" && STRIPE_HOSTS.has(url.hostname) && !url.username && !url.password && !url.port;
+    return url.protocol === "https:" && url.hostname === hostname && !url.username && !url.password && !url.port;
   } catch {
     return false;
   }
+}
+
+/** True only for an https Customer Portal page. Clients open no other billing URL. */
+export function isStripeHostedUrl(value: unknown): value is string {
+  return isHttpsPageOn(value, "billing.stripe.com");
+}
+
+/** True only for an https Stripe Checkout page, where a new server's plan starts. */
+export function isStripeCheckoutUrl(value: unknown): value is string {
+  return isHttpsPageOn(value, "checkout.stripe.com");
 }
 
 /** Returns the Stripe page URL from a `{ url }` response, or null when it is not a Stripe page. */

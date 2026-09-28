@@ -9,7 +9,7 @@ const REQUEST_TIMEOUT_MS = 15_000;
  */
 const HOSTED_SERVER_SETUP_SCRIPT = "exec /opt/OpenBot/hosted/openbot-hosted-env\n";
 
-export type BoatSandboxType = "small" | "default";
+export type BoatSandboxType = "small" | "default" | "large";
 
 export type BoatSandboxState =
   | "init"
@@ -101,6 +101,14 @@ export class BoatClient {
 
   async resumeSandbox(sandboxId: string): Promise<void> {
     await this.#request("POST", `/sandboxes/${encodeURIComponent(sandboxId)}/resume`);
+  }
+
+  /**
+   * Stops and archives the sandbox. boat saves the disk first and keeps the sandbox for a resume. When
+   * that save fails, boat refuses the stop and the sandbox keeps running. This never forces a stop.
+   */
+  async stopSandbox(sandboxId: string): Promise<void> {
+    await this.#request("POST", `/sandboxes/${encodeURIComponent(sandboxId)}/stop`, { body: {} });
   }
 
   /** Deletes the sandbox and its data. A sandbox that is already gone counts as deleted. */

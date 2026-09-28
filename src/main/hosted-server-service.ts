@@ -1,8 +1,12 @@
 import {
   type CreateHostedServerInput,
   type DeleteHostedServerInput,
+  type HostedServerCatalog,
+  type HostedServerCheckout,
   type HostedServerList,
   type HostedServerSummary,
+  parseHostedServerCatalog,
+  parseHostedServerCheckout,
   parseHostedServerList,
   parseHostedServerSummary,
 } from "@openbot/contracts/hosted-servers";
@@ -15,12 +19,17 @@ export interface HostedServerAuthClient {
   requestAuthorized<T>(path: string, init: RequestInit, decoder: (value: unknown) => T, timeoutMs?: number): Promise<T>;
 }
 
-/** The account server's hosted servers, for the signed-in account. */
+/**
+ * The account server's hosted servers, for the signed-in account. A new server waits for its first
+ * payment. The renderer never gets or sends the payment URL: this service opens it only when it is an
+ * https Stripe Checkout page.
+ */
 export class HostedServerDesktopService {
   readonly #lastWakeAt = new Map<string, number>();
 
   constructor(
     private readonly auth: HostedServerAuthClient,
+    private readonly openExternal: (url: string) => Promise<void>,
     private readonly now: () => number = Date.now,
   ) {}
 
@@ -28,17 +37,38 @@ export class HostedServerDesktopService {
     return this.auth.requestAuthorized("/v2/hosting/servers/", { method: "GET" }, decodeList);
   }
 
-  create(input: CreateHostedServerInput): Promise<HostedServerSummary> {
-    return this.auth.requestAuthorized(
+  plans(): Promise<HostedServerCatalog> {
+    return this.auth.requestAuthorized("/v2/hosting/plans", { method: "GET" }, decodeCatalog);
+  }
+
+  async create(input: CreateHostedServerInput): Promise<HostedServerSummary> {
+    const checkout = await this.auth.requestAuthorized(
       "/v2/hosting/servers/",
       {
         method: "POST",
         headers: { "Content-Type": "application/json", "Idempotency-Key": input.requestId },
-        body: JSON.stringify({ name: input.name, size: input.size }),
+        body: JSON.stringify({
+          name: input.name,
+          plan: input.plan,
+          interval: input.interval,
+          currency: input.currency,
+        }),
       },
-      decodeSummary,
+      decodeCheckout,
       30_000,
     );
+    return this.#open(checkout);
+  }
+
+  /** Opens the payment page again for a server that waits for its first payment. */
+  async openCheckout(serverId: string): Promise<HostedServerSummary> {
+    const checkout = await this.auth.requestAuthorized(
+      `/v2/hosting/servers/${encodeURIComponent(serverId)}/checkout`,
+      { method: "POST" },
+      decodeCheckout,
+      30_000,
+    );
+    return this.#open(checkout);
   }
 
   async delete(input: DeleteHostedServerInput): Promise<void> {
@@ -76,6 +106,12 @@ export class HostedServerDesktopService {
       () => undefined,
     );
   }
+
+  /** A null URL means that the payment is done already, so there is no page to open. */
+  async #open(checkout: HostedServerCheckout): Promise<HostedServerSummary> {
+    if (checkout.checkoutUrl) await this.openExternal(checkout.checkoutUrl);
+    return checkout.server;
+  }
 }
 
 function decodeList(value: unknown): HostedServerList {
@@ -88,4 +124,16 @@ function decodeSummary(value: unknown): HostedServerSummary {
   const summary = parseHostedServerSummary(value);
   if (!summary) throw new Error(sourceText("error.auth.invalidHostedServer"));
   return summary;
+}
+
+function decodeCheckout(value: unknown): HostedServerCheckout {
+  const checkout = parseHostedServerCheckout(value);
+  if (!checkout) throw new Error(sourceText("error.auth.invalidHostedServer"));
+  return checkout;
+}
+
+function decodeCatalog(value: unknown): HostedServerCatalog {
+  const catalog = parseHostedServerCatalog(value);
+  if (!catalog) throw new Error(sourceText("error.auth.invalidHostedServer"));
+  return catalog;
 }

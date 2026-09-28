@@ -1,6 +1,7 @@
 import { routeRequest as routeHostedSiteRequest } from "../../../site-router/src/index";
 import { type AuthRetentionResult, pruneExpiredAuthData } from "./auth-data-retention";
-import { type HostedServerBindings, HostedServerService } from "./hosted-server-service";
+import { createHostedBilling } from "./hosted-billing";
+import type { HostedServerBindings } from "./hosted-server-service";
 import { HostedSiteService } from "./hosted-site-service";
 import { enforceMarketplaceIngress, MarketplaceRateLimitError } from "./marketplace-request-policy";
 import { deliverPendingRemoteAuthEvents, RemoteControlPlane } from "./remote-control-plane";
@@ -89,17 +90,19 @@ type HostedServerTickBindingKey =
   | Exclude<keyof HostedServerBindings, "DB">
   | "REMOTE_TICKET_PRIVATE_JWK"
   | "REMOTE_TICKET_PUBLIC_JWKS"
-  | "REMOTE_TICKET_KEY_ID";
+  | "REMOTE_TICKET_KEY_ID"
+  | "STRIPE_SECRET_KEY"
+  | "STRIPE_WEBHOOK_SECRET";
 
 function tickHostedServers(
   bindings: Pick<WorkerBindings, "DB" | "REMOTE_AUTH_WEBHOOK_URL" | "REMOTE_AUTH_WEBHOOK_SECRET"> &
     Partial<Pick<WorkerBindings, HostedServerTickBindingKey>>,
   now: number,
 ) {
-  return new HostedServerService(bindings, {
+  return createHostedBilling(bindings, {
     removeHost: (ownerUserId, hostId) => new RemoteControlPlane(bindings).deleteHost(ownerUserId, hostId),
   })
-    .tick(now)
+    .hosting.tick(now)
     .catch(() => {
       // The next minute checks again. The error can hold SQL or provider detail, so it is not logged.
       console.warn("Hosted server check failed.");

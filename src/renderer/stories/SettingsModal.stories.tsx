@@ -127,7 +127,7 @@ function SettingsModalStory(props: {
   hiddenDetected?: readonly string[];
   /** Where the scan looks. Without it the tab has no detection settings. */
   detectionSettings?: ProviderDetectionSettingsValue;
-  /** Adds the Hosted servers tab with one stopped server. */
+  /** Adds the Hosted servers tab with a stopped server and a server whose plan ended. */
   hostedServers?: boolean;
   initialTab?: SettingsTab;
 }) {
@@ -282,6 +282,7 @@ function SettingsModalStory(props: {
           detectionSettings={detectionSettings()}
           onDetectionSettingsChange={setDetectionSettings}
           hostedServersApi={props.hostedServers ? mock.api.hostedServers : undefined}
+          onAddHostedServer={props.hostedServers ? fn() : undefined}
         />
       </main>
       <Toaster />
@@ -457,7 +458,7 @@ export const Billing: Story = {
   render: () => <SettingsModalStory initialOpen initialTab="billing" />,
 };
 
-/** An account that can create hosted servers. Create, wake and delete change the mock list. */
+/** An account that can create hosted servers. Start, renew and delete change the mock list. */
 export const HostedServers: Story = {
   render: () => <SettingsModalStory initialOpen hostedServers initialTab="hosted-servers" />,
 };

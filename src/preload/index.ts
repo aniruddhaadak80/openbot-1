@@ -74,6 +74,7 @@ import {
   decodeDiscoverModelsResult,
   decodeExportResult,
   decodeHostedServer,
+  decodeHostedServerCatalog,
   decodeHostedServerList,
   decodeHostedSite,
   decodeHostedSites,
@@ -537,7 +538,9 @@ const openbotApi: OpenBotDesktopApi = {
   }),
   hostedServers: bridgeGroup(IPC_ENDPOINTS.hostedServers, {
     list: decodeHostedServerList,
+    plans: decodeHostedServerCatalog,
     create: decodeHostedServer,
+    openCheckout: decodeHostedServer,
     delete: decodeVoid,
     wake: decodeHostedServer,
   }),

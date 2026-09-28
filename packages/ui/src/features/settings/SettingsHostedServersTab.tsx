@@ -1,9 +1,8 @@
+import { BILLING_PLANS, type BillingPlanId } from "@openbot/contracts/billing";
 import {
-  HOSTED_SERVER_NAME_MAX_LENGTH,
-  HOSTED_SERVER_SIZE_NAMES,
   HOSTED_SERVER_SIZES,
-  type HostedServerSize,
   type HostedServerState,
+  type HostedServerSummary,
 } from "@openbot/contracts/hosted-servers";
 import type { AppTextKey } from "@openbot/i18n";
 import {
@@ -20,11 +19,6 @@ import {
   ItemGroup,
   ItemTitle,
   Plus,
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
   SettingsSection,
   Text,
   Trash2,
@@ -35,14 +29,18 @@ import type { SettingsHostedServersStore } from "./stores/hosted-servers-store";
 
 interface SettingsHostedServersTabProps {
   store: SettingsHostedServersStore;
-  /** The dialog element the size popover portals into, as the other Settings selects receive it. */
-  selectMount?: HTMLElement | undefined;
+  /** Opens the add server dialog, where the user picks a plan and pays. */
+  onAddServer?: (() => void) | undefined;
 }
 
-/** Kobalte takes a mutable array. */
-const sizeOptions: HostedServerSize[] = [...HOSTED_SERVER_SIZE_NAMES];
+const PLAN_NAMES = {
+  starter: "settings.hostedServers.plan.starter.name",
+  standard: "settings.hostedServers.plan.standard.name",
+  pro: "settings.hostedServers.plan.pro.name",
+} as const satisfies Record<BillingPlanId, AppTextKey>;
 
 const STATE_LABELS = {
+  awaiting_payment: "settings.hostedServers.state.awaitingPayment",
   creating: "settings.hostedServers.state.creating",
   starting: "settings.hostedServers.state.starting",
   running: "settings.hostedServers.state.running",
@@ -54,6 +52,7 @@ const STATE_LABELS = {
 } as const satisfies Record<HostedServerState, AppTextKey>;
 
 const STATE_TONES: Record<HostedServerState, BadgeTone> = {
+  awaiting_payment: "warning",
   creating: "accent",
   starting: "accent",
   running: "success",
@@ -67,53 +66,33 @@ const STATE_TONES: Record<HostedServerState, BadgeTone> = {
 export function SettingsHostedServersTab(props: SettingsHostedServersTabProps) {
   const { t } = useText();
   const state = () => props.store.state;
-  const sizeLabel = (size: HostedServerSize) =>
-    t(size === "small" ? "settings.hostedServers.size.small" : "settings.hostedServers.size.default", {
-      vcpu: HOSTED_SERVER_SIZES[size].vcpu,
-      memory: HOSTED_SERVER_SIZES[size].memoryGb,
-      disk: HOSTED_SERVER_SIZES[size].diskGb,
+  const planEnded = (server: HostedServerSummary) => server.state === "stopped" && server.error === "plan_ended";
+  const description = (server: HostedServerSummary) => {
+    if (server.state === "awaiting_payment") return t("settings.hostedServers.paymentDescription");
+    if (planEnded(server)) return t("settings.hostedServers.planEndedDescription");
+    if (server.state === "error") return t("settings.hostedServers.errorDescription");
+    const size = HOSTED_SERVER_SIZES[server.size];
+    return t("settings.hostedServers.planSpec", {
+      plan: t(PLAN_NAMES[server.plan]),
+      vcpu: size.vcpu,
+      memory: size.memoryGb,
+      // The plan's storage, as the plan cards show it. The machine disk can be larger.
+      disk: BILLING_PLANS.find((plan) => plan.id === server.plan)?.storageGb ?? size.diskGb,
     });
+  };
 
   return (
     <SettingsSection title={t("settings.hostedServers.title")} description={t("settings.hostedServers.description")}>
-      <form
-        class="hosted-servers-create"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void props.store.create();
-        }}
-      >
-        <Field label={t("settings.hostedServers.nameLabel")} error={state().createError ?? undefined}>
-          <Input
-            value={state().draftName}
-            maxlength={HOSTED_SERVER_NAME_MAX_LENGTH}
-            autocomplete="off"
-            placeholder={t("settings.hostedServers.namePlaceholder")}
-            disabled={state().creating}
-            onValueChange={props.store.setDraftName}
-          />
-        </Field>
-        <Select<HostedServerSize>
-          class="settings-modal-select"
-          options={sizeOptions}
-          value={state().draftSize}
-          disabled={state().creating}
-          onChange={(size) => size && props.store.setDraftSize(size)}
-          placement="bottom-start"
-          itemComponent={(itemProps) => (
-            <SelectItem item={itemProps.item}>{sizeLabel(itemProps.item.rawValue)}</SelectItem>
-          )}
-        >
-          <SelectTrigger size="md" aria-label={t("settings.hostedServers.sizeLabel")}>
-            <SelectValue<HostedServerSize>>{(select) => sizeLabel(select.selectedOption())}</SelectValue>
-          </SelectTrigger>
-          <SelectContent mount={props.selectMount} />
-        </Select>
-        <Button type="submit" disabled={state().creating || !state().draftName.trim()}>
-          <Plus size={14} aria-hidden="true" />
-          {state().creating ? t("settings.hostedServers.creating") : t("settings.hostedServers.create")}
-        </Button>
-      </form>
+      <Show when={props.onAddServer}>
+        {(addServer) => (
+          <div class="hosted-servers-add">
+            <Button onClick={() => addServer()()}>
+              <Plus size={14} aria-hidden="true" />
+              {t("settings.hostedServers.add")}
+            </Button>
+          </div>
+        )}
+      </Show>
       <Text tone="muted" variant="caption">
         {t("settings.hostedServers.alwaysOnNote")}
       </Text>
@@ -134,14 +113,33 @@ export function SettingsHostedServersTab(props: SettingsHostedServersTabProps) {
                 <ItemContent>
                   <ItemTitle>
                     {server.name}
-                    <Badge tone={STATE_TONES[server.state]}>{t(STATE_LABELS[server.state])}</Badge>
+                    <Show
+                      when={planEnded(server)}
+                      fallback={<Badge tone={STATE_TONES[server.state]}>{t(STATE_LABELS[server.state])}</Badge>}
+                    >
+                      <Badge tone="warning">{t("settings.hostedServers.state.planEnded")}</Badge>
+                    </Show>
                   </ItemTitle>
-                  <ItemDescription>
-                    {server.state === "error" ? t("settings.hostedServers.errorDescription") : sizeLabel(server.size)}
-                  </ItemDescription>
+                  <ItemDescription>{description(server)}</ItemDescription>
                 </ItemContent>
                 <ItemActions class="hosted-servers-actions">
-                  <Show when={server.state === "stopped" || server.state === "error"}>
+                  <Show when={server.state === "awaiting_payment" || planEnded(server)}>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      aria-label={t(
+                        planEnded(server) ? "settings.hostedServers.renewLabel" : "settings.hostedServers.payLabel",
+                        { name: server.name },
+                      )}
+                      disabled={state().checkoutServerId !== null}
+                      onClick={() => void props.store.openCheckout(server)}
+                    >
+                      {state().checkoutServerId === server.serverId
+                        ? t("settings.hostedServers.openingCheckout")
+                        : t(planEnded(server) ? "settings.hostedServers.renew" : "settings.hostedServers.pay")}
+                    </Button>
+                  </Show>
+                  <Show when={(server.state === "stopped" && !planEnded(server)) || server.state === "error"}>
                     <Button
                       variant="outline"
                       size="sm"
