@@ -164,6 +164,12 @@ secret in `/srv` stays. From the resume call to the OpenBot start took 7 to 34 s
 took 40 ms. Most of the time is boat: it restores the disk and then starts the enabled units, 5 to
 20 s after the sandbox is `idle`.
 
+A resize test on 2026-09-28 (one plain sandbox with `noEnv`, `small → default → small`, each a stop
+and a resume with `type`) confirmed that boat changes the machine in place with the same sandbox
+ID (2 vCPU/4 GB, then 4 vCPU/8 GB, then 2 vCPU/4 GB). Files in `/srv` and in the home folder stayed,
+and an enabled systemd unit started again after each resume. The stop took 25 to 31 s, and the
+sandbox was `idle` 3 to 6 s after the resume call.
+
 A boat trial account refuses a sandbox with no auto-stop (`trial_auto_stop_required`), and the
 Worker shows it as `provider_billing`. The test ran with a local two-hour TTL; the Worker needs a
 paid boat plan.
@@ -178,8 +184,9 @@ These were not tested on boat. Test them before a user gets access:
   no longer accepts. For 24 hours, boat refuses each retry with `idempotency_key_reused`, which the
   Worker logs. After that, a retry makes a new sandbox. An operator must delete the first one;
 - the vCPU, memory and disk of boat `large`;
-- a resize on boat: stop, then resume with a `type`. The docs say that it keeps the disk and costs
-  nothing more than the resume. The test uses a fake boat;
+- a downgrade that boat refuses with `type_too_small`. The test uses a fake boat;
+- the disk of each size. The root file system showed 69 GB on `small` and on `default`, not the 12 GB
+  and 50 GB of the boat machine table. The limit that `type_too_small` uses is not known;
 - that boat frees the key of a refused create, so a retry of a setup that failed works;
 - whether boat stops a sandbox that runs for weeks. The Worker restarts it, but work in progress
   at that time stops.
