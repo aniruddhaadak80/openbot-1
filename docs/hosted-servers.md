@@ -124,8 +124,16 @@ template applies only to new servers. boat keeps at most 10 named snapshots for 
 On a server, `openbot-hosted-server` starts a D-Bus session, unlocks a gnome-keyring with a
 random password for each server (so `safeStorage` can keep the account session), and runs OpenBot
 under `xvfb-run` with `--password-store=gnome-libsecret`. The keyring files are in
-`~/.config/openbot-hosted/data/keyrings`, not in `~/.local/share/keyrings`: the boat image has a
-locked `default` keyring there, and a snapshot restore resets that folder after the service starts.
+`/srv/openbot-hosted/keyrings`:
+
+- not in `~/.local/share/keyrings`: the boat image has a locked `default` keyring there, and a
+  snapshot restore resets that folder after the service starts;
+- not in `/home`: after a resume, boat serves `/home` from a FUSE mount until the disk is restored.
+  On that mount, gnome-keyring does not see the new link count after its backup link. Each keyring
+  write then added 16,000 to 31,000 `login.keyring.temp-*` hard links, and the next resume read
+  them through the slow mount for 25 s. boat keeps changes in `/srv` (not in `/var/lib`), and `/srv`
+  is on the disk before the service starts.
+
 OpenBot redeems the claim only when `safeStorage` works. The claim works one time, so a session
 that is only in memory would leave the server signed out after its next start.
 
@@ -141,6 +149,12 @@ The `boat` scenario of `scripts/stripe-flows-e2e.ts` (see `apps/auth-api/README.
   stored session after a restart (`safeStorage` with gnome-keyring under Xvfb);
 - a delete through the Worker removes the sandbox.
 
+A resume test on 2026-09-28 (one sandbox with the 0.24.0 AppImage, 6 resumes, each on another
+machine) confirmed that systemd starts `openbot.service` again after a resume, and that a keyring
+secret in `/srv` stays. From the resume call to the OpenBot start took 7 to 34 s; the keyring start
+took 40 ms. Most of the time is boat: it restores the disk and then starts the enabled units, 5 to
+20 s after the sandbox is `idle`.
+
 A boat trial account refuses a sandbox with no auto-stop (`trial_auto_stop_required`), and the
 Worker shows it as `provider_billing`. The test ran with a local two-hour TTL; the Worker needs a
 paid boat plan.
@@ -149,8 +163,6 @@ paid boat plan.
 
 These were not tested on boat. Test them before a user gets access:
 
-- that systemd starts enabled units after a resume, and how long a resume takes after boat stops a
-  sandbox;
 - that production Signal accepts tickets from the `test` Worker;
 - a lost response to the boat create call. The idempotency key is the host ID, so a retry returns
   the same sandbox, but no retry runs by itself;

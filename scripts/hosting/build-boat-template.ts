@@ -82,6 +82,7 @@ async function main(): Promise<void> {
         "! systemctl is-active --quiet openbot.service",
         'test ! -e "$HOME/.config/OpenBot"',
         'test ! -e "$HOME/.config/openbot-hosted"',
+        'test -z "$(ls -A /srv/openbot-hosted)"',
         `rm -rf ${REMOTE_DIRECTORY}`,
       ].join(" && "),
     );

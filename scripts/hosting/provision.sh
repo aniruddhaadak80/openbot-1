@@ -66,6 +66,9 @@ if command -v apparmor_parser >/dev/null && [ -d /sys/kernel/security/apparmor ]
 fi
 
 install -m 0755 "$SOURCE/openbot-hosted-server" "$SOURCE/openbot-hosted-env" "$INSTALL/hosted/"
+# The server keyring. boat keeps changes in /srv, and /srv is on the disk while /home is still on
+# the restore mount after a resume. openbot-hosted-server explains why that matters.
+install -d -o "$SERVICE_USER" -g "$(id -gn "$SERVICE_USER")" -m 0700 /srv/openbot-hosted
 # Not a secret: the account server that this template's servers sign in to.
 printf 'OPENBOT_AUTH_API_URL=%s\n' "${AUTH_API_URL%/}" >"$INSTALL/hosted/openbot.env"
 chmod 0644 "$INSTALL/hosted/openbot.env"
