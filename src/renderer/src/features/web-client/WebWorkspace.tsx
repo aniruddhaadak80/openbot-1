@@ -279,10 +279,15 @@ function WebWorkspaceFrame(props: WebWorkspaceProps) {
     return available;
   }
   void refreshHostedServersAvailable();
-  /** The plus button opens the add server dialog when the account can create hosted servers, else the join dialog. */
-  async function openAddServer(): Promise<void> {
-    if (await refreshHostedServersAvailable()) setAddServer({ resume: null });
+  /**
+   * The plus button opens the add server dialog when the account can create hosted servers, else the
+   * join dialog. It uses the last answer, so the click does not wait for the network; the read after it
+   * is for the next click.
+   */
+  function openAddServer(): void {
+    if (hostedServersAvailable()) setAddServer({ resume: null });
     else setJoinOpen(true);
+    void refreshHostedServersAvailable();
   }
   createEffect(
     () => props.hostingReturn,
@@ -950,7 +955,7 @@ function WebWorkspaceFrame(props: WebWorkspaceProps) {
                   servers={servers()}
                   onSelect={selectServer}
                   onReorder={workspace.reorderHosts}
-                  onAdd={() => void openAddServer()}
+                  onAdd={openAddServer}
                   addCreatesServer={hostedServersAvailable()}
                   onOpenSettings={(id, trigger) => void openServerSettings(id, trigger)}
                   onOpenUsage={(id, trigger) => void openUsage(id, trigger)}
@@ -980,7 +985,7 @@ function WebWorkspaceFrame(props: WebWorkspaceProps) {
                   view: layout.serverView(),
                   onViewChange: layout.setServerView,
                   onSelect: selectServer,
-                  onAdd: () => void openAddServer(),
+                  onAdd: openAddServer,
                   addCreatesServer: hostedServersAvailable(),
                   onOpenSettings: (id, trigger) => void openServerSettings(id, trigger),
                   onOpenUsage: (id, trigger) => void openUsage(id, trigger),
@@ -1090,6 +1095,7 @@ function WebWorkspaceFrame(props: WebWorkspaceProps) {
                 open={addServer() !== null}
                 calls={hostedServerCalls}
                 servers={servers()}
+                onRefreshServers={workspace.retryHosts}
                 resume={addServer()?.resume}
                 onClose={() => setAddServer(null)}
                 onOpenServer={(serverId) => {

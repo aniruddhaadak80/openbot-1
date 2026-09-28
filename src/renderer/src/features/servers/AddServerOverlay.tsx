@@ -33,6 +33,11 @@ interface AddServerOverlayProps {
   calls: AddServerCalls;
   /** The servers on the rail. The new server is ready when it shows here. */
   servers: readonly ServerSummary[];
+  /**
+   * Reads the rail servers again, while the new server runs but is not on the rail yet. Without it,
+   * the consumer's own events must add the server.
+   */
+  onRefreshServers?: (() => Promise<void>) | undefined;
   resume?: AddServerResume | null | undefined;
   onClose: () => void;
   onOpenServer: (serverId: string) => void;
@@ -66,6 +71,8 @@ function AddServerSession(props: AddServerOverlayProps) {
   /** One key for each choice. A retry after a lost response sends the same key. */
   const requestIds = new Map<string, string>();
   const resume = untrack(() => props.resume) ?? null;
+  /** A read can take longer than the poll interval. The next tick then skips, so reads do not overlap. */
+  let refreshing = false;
 
   void load();
 
@@ -119,13 +126,21 @@ function AddServerSession(props: AddServerOverlayProps) {
 
   async function refresh(): Promise<void> {
     const serverId = state.server?.serverId;
-    if (!serverId) return;
-    const list = await props.calls.list().catch(() => null);
-    const server = list?.servers.find((entry) => entry.serverId === serverId);
-    if (server && state.server?.serverId === serverId) {
-      setState((draft) => {
-        draft.server = server;
-      });
+    if (!serverId || refreshing) return;
+    refreshing = true;
+    try {
+      const [list] = await Promise.all([
+        props.calls.list().catch(() => null),
+        setupStatus() === "connecting" ? props.onRefreshServers?.().catch(() => undefined) : undefined,
+      ]);
+      const server = list?.servers.find((entry) => entry.serverId === serverId);
+      if (server && state.server?.serverId === serverId) {
+        setState((draft) => {
+          draft.server = server;
+        });
+      }
+    } finally {
+      refreshing = false;
     }
   }
 

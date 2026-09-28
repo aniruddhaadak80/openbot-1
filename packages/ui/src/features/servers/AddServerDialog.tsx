@@ -27,6 +27,7 @@ import {
   type HostedServerPlanId,
   HostedServerPlans,
   hostedPriceLength,
+  hostedYearlyDiscountPercent,
 } from "./HostedServerPricing";
 
 /**
@@ -251,9 +252,12 @@ export function AddServerDialog(props: AddServerDialogProps) {
             aria-busy={creating() ? "true" : undefined}
             onOpenAutoFocus={(event) => {
               event.preventDefault();
-              queueMicrotask(() =>
-                pricing?.querySelector<HTMLInputElement>("input:checked")?.focus({ preventScroll: true }),
-              );
+              // A dialog that opens on the setup, as after the payment page, reads the step heading.
+              if (step() === "progress") focusHeading();
+              else
+                queueMicrotask(() =>
+                  pricing?.querySelector<HTMLInputElement>("input:checked")?.focus({ preventScroll: true }),
+                );
             }}
           >
             <Dialog.Title class="sr-only">{t("server.add.title")}</Dialog.Title>
@@ -284,7 +288,12 @@ export function AddServerDialog(props: AddServerDialogProps) {
                         disabled={creating()}
                         mount={pricing}
                       />
-                      <HostedBillingSwitch billing={billing()} onChange={setBilling} disabled={creating()} />
+                      <HostedBillingSwitch
+                        billing={billing()}
+                        discountPercent={hostedYearlyDiscountPercent(props.plans, currency())}
+                        onChange={setBilling}
+                        disabled={creating()}
+                      />
                     </div>
 
                     <HostedServerPlans

@@ -44,12 +44,16 @@ export function useServerActions() {
     });
   }
 
-  /** Opens the hosted server plans when the account can create a hosted server, otherwise the invite dialog. */
+  /**
+   * Opens the hosted server plans when the account can create a hosted server, otherwise the invite
+   * dialog. It uses the last answer, so the click does not wait for the network; the read after it is
+   * for the next click.
+   */
   function add(): void {
     if (platform.landingPreview) return;
-    void refreshHostedServersAvailable().then((available) =>
-      available ? setAddServerOpen(true) : setJoinServerOpen(true),
-    );
+    if (hostedServersAvailable()) setAddServerOpen(true);
+    else setJoinServerOpen(true);
+    void refreshHostedServersAvailable();
   }
 
   const callbacks: Required<ServerActionCallbacks> = {

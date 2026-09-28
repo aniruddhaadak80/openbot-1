@@ -54,6 +54,8 @@ export function createSettingsHostedServersStore(props: HostedServersStoreProps,
     deleteError: null,
   });
   let loadRevision = 0;
+  /** A read can take longer than the poll interval. A poll or focus read then skips, so reads do not overlap. */
+  let reloading = false;
 
   async function load(): Promise<void> {
     const api = props.hostedServersApi;
@@ -84,12 +86,37 @@ export function createSettingsHostedServersStore(props: HostedServersStoreProps,
     },
   );
 
+  function reload(): void {
+    if (reloading) return;
+    reloading = true;
+    void load().finally(() => {
+      reloading = false;
+    });
+  }
+
   createEffect(
     () => props.open && isActive() && panel.servers.some((server) => TRANSITION_STATES.has(server.state)),
     (shouldPoll) => {
       if (!shouldPoll) return;
-      const timer = window.setInterval(() => void load(), TRANSITION_REFRESH_INTERVAL_MS);
+      const timer = window.setInterval(reload, TRANSITION_REFRESH_INTERVAL_MS);
       return () => window.clearInterval(timer);
+    },
+  );
+
+  // The payment page and the Stripe portal open in the browser, so the list reads again when the user comes back.
+  createEffect(
+    () => props.open && isActive() && Boolean(props.hostedServersApi),
+    (shown) => {
+      if (!shown) return;
+      const reloadVisible = () => {
+        if (document.visibilityState !== "hidden") reload();
+      };
+      window.addEventListener("focus", reloadVisible);
+      document.addEventListener("visibilitychange", reloadVisible);
+      return () => {
+        window.removeEventListener("focus", reloadVisible);
+        document.removeEventListener("visibilitychange", reloadVisible);
+      };
     },
   );
 

@@ -59,8 +59,19 @@ export interface HostedServerPlan {
   relativeSpeed: number;
 }
 
-/** Yearly billing costs this much less than twelve monthly payments. */
-export const YEARLY_DISCOUNT_PERCENT = 20;
+/**
+ * How much less yearly billing costs than twelve monthly payments, in whole percent, from the prices of
+ * the catalog. It is the smallest discount of the plans, so the text is true for each plan. 0 means no discount.
+ */
+export function hostedYearlyDiscountPercent(plans: readonly HostedServerPlan[], currency: HostedCurrency): number {
+  const discounts = plans.map((plan) => {
+    // In cents, so that the division does not get a floating point error such as 19.999.
+    const twelveMonths = Math.round(plan.monthlyPrice[currency] * 100) * 12;
+    const year = Math.round(plan.yearlyPrice[currency] * 100);
+    return twelveMonths > 0 ? Math.floor(((twelveMonths - year) * 100) / twelveMonths) : 0;
+  });
+  return discounts.length === 0 ? 0 : Math.max(0, Math.min(...discounts));
+}
 
 /** The price for one month. On yearly billing this is the yearly price divided by 12. */
 export function hostedPlanMonthlyPrice(
@@ -104,6 +115,8 @@ const BILLING_OPTIONS: readonly HostedServerBilling[] = ["monthly", "yearly"];
 
 interface HostedBillingSwitchProps {
   billing: HostedServerBilling;
+  /** The yearly discount in whole percent. The switch does not show a discount of 0. */
+  discountPercent: number;
   onChange: (billing: HostedServerBilling) => void;
   disabled?: boolean | undefined;
 }
@@ -133,7 +146,9 @@ export function HostedBillingSwitch(props: HostedBillingSwitchProps) {
         <RadioGroup.ItemInput />
         <RadioGroup.ItemControl class="hosted-billing-control">
           <RadioGroup.ItemLabel>{t("server.add.billing.yearly")}</RadioGroup.ItemLabel>
-          <span class="hosted-billing-save">{t("server.add.billing.save", { percent: YEARLY_DISCOUNT_PERCENT })}</span>
+          <Show when={props.discountPercent > 0}>
+            <span class="hosted-billing-save">{t("server.add.billing.save", { percent: props.discountPercent })}</span>
+          </Show>
         </RadioGroup.ItemControl>
       </RadioGroup.Item>
     </RadioGroup.Root>
