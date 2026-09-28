@@ -107,7 +107,7 @@ export interface HostedServerServiceOptions {
   fetch?: BoatFetch;
   now?: () => number;
   /** Removes the Remote host of a deleted server. It is null when Remote is not configured. */
-  removeHost?: ((ownerUserId: string, hostId: string) => Promise<void>) | null;
+  removeHost?: ((ownerUserId: string, hostId: string) => Promise<void>) | null | undefined;
   /** Null when the deployment has no Stripe key. Then no server can be created, and plans are not checked. */
   billing?: HostedServerBilling | null;
 }

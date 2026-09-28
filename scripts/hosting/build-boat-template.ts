@@ -115,7 +115,7 @@ function boatRequester(apiKey: string): BoatRequester {
     const response = await fetch(`${BOAT_API_URL}${path}`, {
       method,
       headers,
-      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
       signal: AbortSignal.timeout(660_000),
     });
     const text = await response.text();

@@ -117,7 +117,7 @@ export function HostedBillingSwitch(props: HostedBillingSwitchProps) {
       data-billing={props.billing}
       aria-label={t("server.add.billing.label")}
       value={props.billing}
-      disabled={props.disabled}
+      disabled={props.disabled ?? false}
       onChange={(value) => {
         const billing = BILLING_OPTIONS.find((option) => option === value);
         if (billing) props.onChange(billing);
@@ -159,7 +159,7 @@ export function HostedCurrencySelect(props: HostedCurrencySelectProps) {
       class="hosted-currency"
       options={CURRENCY_OPTIONS}
       value={props.currency}
-      disabled={props.disabled}
+      disabled={props.disabled ?? false}
       onChange={(currency) => currency && props.onChange(currency)}
       placement="bottom-start"
       sameWidth={false}

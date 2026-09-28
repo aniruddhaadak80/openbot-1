@@ -59,7 +59,7 @@ export type BoatFetch = (input: string, init: RequestInit) => Promise<Response>;
 
 export interface BoatClientOptions {
   apiKey: string;
-  fetch?: BoatFetch;
+  fetch?: BoatFetch | undefined;
   baseUrl?: string;
 }
 
@@ -139,7 +139,7 @@ export class BoatClient {
       response = await this.#fetch(`${this.#baseUrl}${path}`, {
         method,
         headers,
-        body: options.body === undefined ? undefined : JSON.stringify(options.body),
+        ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
     } catch {
