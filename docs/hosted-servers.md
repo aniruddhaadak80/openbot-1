@@ -34,7 +34,7 @@ States: `awaiting_payment → creating → starting → running`; `running → s
    Checkout URL (30 minutes). A repeated request expires the old Checkout and returns a new one.
    The desktop main process opens the URL only when it is an `https://checkout.stripe.com` URL; the
    renderer never gets it. The web client goes to the page in the same tab, and Stripe returns to
-   `/app?hosting=checkout&server=<id>` (`&cancelled=1` when the user went back).
+   `/app?hosting=checkout&hosted_server=<id>` (`&cancelled=1` when the user went back).
    `POST /v2/hosting/servers/:id/checkout` makes a new page for "Open the payment page again".
 2. **Provision.** The signed Stripe webhook syncs the subscription to D1 and calls
    `onSubscriptionSynced`. When the plan is open and the row waits for payment, the Worker makes

@@ -473,7 +473,7 @@ function plansUnavailable(): BillingError {
 
 /** The web client opens the progress of this server again. The desktop app polls, so its page only says to go back. */
 function checkoutReturnUrl(origin: string, target: BillingReturnTarget, serverId: string): string {
-  if (target === "web") return `${origin}/app?hosting=checkout&server=${encodeURIComponent(serverId)}`;
+  if (target === "web") return `${origin}/app?hosting=checkout&hosted_server=${encodeURIComponent(serverId)}`;
   return `${origin}/billing/return`;
 }
 

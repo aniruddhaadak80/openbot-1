@@ -72,16 +72,20 @@ function errorMessage(value: unknown): string {
   return currentText().t("webClient.error.requestFailed");
 }
 
-/** Stripe Checkout returns to `/app?hosting=checkout&server=<id>`, with `&cancelled=1` when the user went back. */
+/**
+ * Stripe Checkout returns to `/app?hosting=checkout&hosted_server=<id>`, with `&cancelled=1` when the user
+ * went back. The server field is not `server`: an invitation link uses that name, and its reader removes it first.
+ */
 const WEB_APP_HOSTING_PARAM = "hosting";
+const WEB_APP_HOSTED_SERVER_PARAM = "hosted_server";
 
 /** The server of a return from Stripe Checkout. The query is removed after it is read. */
 export function takeHostingReturn(): AddServerResume | null {
   const url = new URL(window.location.href);
   if (url.searchParams.get(WEB_APP_HOSTING_PARAM) !== "checkout") return null;
-  const serverId = url.searchParams.get("server");
+  const serverId = url.searchParams.get(WEB_APP_HOSTED_SERVER_PARAM);
   const paid = url.searchParams.get("cancelled") !== "1";
-  for (const name of [WEB_APP_HOSTING_PARAM, "server", "cancelled"]) url.searchParams.delete(name);
+  for (const name of [WEB_APP_HOSTING_PARAM, WEB_APP_HOSTED_SERVER_PARAM, "cancelled"]) url.searchParams.delete(name);
   window.history.replaceState(window.history.state, "", url);
   return serverId ? { serverId, paid } : null;
 }
