@@ -26,6 +26,8 @@ const LOCAL_RUNTIME_KEYS = [
   "HOSTED_SERVER_TEMPLATE",
   "BOAT_API_KEY",
   "BOAT_WEBHOOK_SECRET",
+  "STRIPE_SECRET_KEY",
+  "STRIPE_PUBLISHABLE_KEY",
 ] as const;
 
 const BOOLEAN_RUNTIME_KEYS = new Set<(typeof LOCAL_RUNTIME_KEYS)[number]>([
@@ -39,7 +41,8 @@ export function readLocalRuntimeVars(environment: NodeJS.ProcessEnv): Record<str
   const result: Record<string, string> = {};
   for (const key of LOCAL_RUNTIME_KEYS) {
     const value = environment[key];
-    if (value === undefined) continue;
+    // dotenvx passes the ciphertext on when a developer has no key for `.env.shared`.
+    if (value === undefined || value.startsWith("encrypted:")) continue;
     result[key] = BOOLEAN_RUNTIME_KEYS.has(key) ? (normalizeBooleanFlag(value) ? "true" : "false") : value;
   }
   return result;

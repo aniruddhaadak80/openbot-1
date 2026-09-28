@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "dotenvx run -f .env.dev -fk ../../.env.keys -- vite dev",
+    "dev": "dotenvx run -f .env.dev -f .env.shared -fk ../../.env.keys -- vite dev",
     "start": "bun run build && bun run preview",
     "build": "vite build",
     "images": "bun render-content-images.ts",

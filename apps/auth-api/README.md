@@ -14,7 +14,14 @@ ticket key pair plus random admin, report and webhook secrets, all local to the
 checkout. Nothing in it is shared with production or with another machine, so a
 fork needs no key from anyone. Delete the file and rerun to get a fresh set.
 
-`.env.production` is the only encrypted file, and its private key stays in the
+`.env.shared` holds encrypted development values that all maintainers share, now the Stripe
+sandbox keys. `bun run dev:api` decrypts it in memory. Ask a maintainer for
+`DOTENV_PRIVATE_KEY_SHARED`, then export it in your shell profile or add it to the root
+`.env.keys`. The shell profile works in every worktree. Without the key, the Worker runs with no
+Stripe keys. A value in `.env.dev` overrides the shared value. To change a value, run
+`bunx dotenvx set <NAME> <value> -f apps/auth-api/.env.shared -fk .env.keys`.
+
+`.env.production` is the only encrypted production file, and its private key stays in the
 ignored root `.env.keys`. Dotenvx decrypts it only in process memory, and only
 the deploy and secret-rotation commands read it.
 
