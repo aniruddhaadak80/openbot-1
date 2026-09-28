@@ -34,8 +34,16 @@ if [ ! -s "$state/keyring-password" ]; then
   head -c 32 /dev/urandom | base64 | tr -d '\n' >"$temporary"
   mv -f "$temporary" "$state/keyring-password"
 fi
+# The keyring files stay in the state folder, not in ~/.local/share/keyrings. The boat image has a
+# `default` keyring there with a password that this server does not know, and a snapshot restore
+# resets that folder after this service starts. libsecret stores in the `default` collection, so
+# the alias points to the `login` keyring that the daemon unlocks.
+export XDG_DATA_HOME="$state/data"
+mkdir -p "$XDG_DATA_HOME/keyrings"
+printf login >"$XDG_DATA_HOME/keyrings/default"
 eval "$(gnome-keyring-daemon --unlock --components=secrets <"$state/keyring-password")"
 eval "$(gnome-keyring-daemon --start --components=secrets)"
+unset XDG_DATA_HOME
 export GNOME_KEYRING_CONTROL
 
 exec xvfb-run -a -s "-screen 0 1280x800x24 -nolisten tcp" \

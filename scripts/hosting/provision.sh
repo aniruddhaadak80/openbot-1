@@ -43,7 +43,9 @@ rm -rf "$INSTALL/app"
 install -d -m 0755 "$INSTALL" "$INSTALL/hosted"
 mv "$work/squashfs-root" "$INSTALL/app"
 chown -R root:root "$INSTALL/app"
-chmod -R go-w "$INSTALL/app"
+# The extract keeps the umask of this shell, which can be 077 under sudo. The service user must read
+# and run every file, and must not write any of them.
+chmod -R u+rwX,go=rX "$INSTALL/app"
 [ -x "$INSTALL/app/openbot" ] || { echo "The AppImage has no openbot executable." >&2; exit 1; }
 
 # The Electron sandbox stays on. It needs the SUID helper, owned as a package manager would own it,

@@ -10,6 +10,10 @@
  * The Worker must run with `HOSTED_SERVERS_ALLOWED_USER_IDS` set to the IDs that `--print-user-ids`
  * prints, and `stripe listen` must forward to it. The `portal` scenario prints two Customer Portal
  * pages and waits until someone uses them. The report goes to `.openbot-build/stripe-flows-e2e.json`.
+ *
+ * The `boat` scenario runs only when named. It makes a real VM: the Worker needs the real `BOAT_API_KEY`
+ * and `HOSTED_SERVER_TEMPLATE`, and the template must know a public origin of this Worker. It waits
+ * until OpenBot in the VM redeems its claim and publishes its host, then deletes the server.
  */
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -33,6 +37,7 @@ const SCENARIOS = [
   "foreign",
   "customer-deleted",
   "portal",
+  "boat",
 ] as const;
 type Scenario = (typeof SCENARIOS)[number];
 const DAY = 86_400;
@@ -92,6 +97,13 @@ const planSchema = z.object({
 type Plan = z.infer<typeof planSchema>;
 const billingSchema = z.object({ servers: z.array(planSchema) });
 const errorSchema = z.object({ error: z.object({ code: z.string() }) });
+const hostSchema = z.object({
+  claim_redeemed_at: z.number().nullable(),
+  host_name: z.string().nullable(),
+  published: z.number(),
+});
+const commandSchema = z.object({ exitCode: z.number().nullable().optional(), stdout: z.string().optional() });
+const sandboxSchema = z.object({ sandbox: z.object({ state: z.string() }) });
 const portalSchema = z.object({ url: z.string() });
 
 /** The request bodies of the browser API routes that this check calls. */
@@ -134,6 +146,18 @@ async function stripe<T>(
     throw new Error(`Stripe ${method} ${path} ${response.status}: ${error.data?.error.message ?? "unknown error"}`);
   }
   return schema.parse(value);
+}
+
+/** The `boat` scenario only. The development key from `.env.shared` reads the VM of the test server. */
+async function boat(method: "GET" | "POST", path: string, body?: { command: string; timeoutSeconds: number }) {
+  const key = process.env.BOAT_API_KEY ?? "";
+  if (!key.startsWith("boat_")) throw new Error("BOAT_API_KEY must be the development boat key.");
+  const response = await fetch(`https://boat.dev/api/v1${path}`, {
+    method,
+    headers: { Authorization: `Bearer ${key}`, ...(body ? { "Content-Type": "application/json" } : {}) },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  return { status: response.status, body: z.unknown().parse(await response.json().catch(() => null)) };
 }
 
 const d1ResultSchema = z.array(z.object({ results: z.array(z.unknown()) }));
@@ -719,6 +743,101 @@ const scenarios: Record<Scenario, (account: Account) => Promise<void>> = {
       { oldReplaced: stored?.stripe_customer_id !== old },
     );
   },
+  async boat(account) {
+    const name = "Boat e2e";
+    const { server } = await account.createServer(name);
+    let deleted = false;
+    try {
+      await account.pay(server.serverId);
+      const created = await rowWhere(
+        account,
+        server.serverId,
+        "sandbox",
+        (row) => row.provider_sandbox_id !== null || row.observed_state === "error",
+        120_000,
+      );
+      const sandboxId = created.provider_sandbox_id;
+      record("boat", "payment creates one boat VM from the template", sandboxId !== null, created);
+      if (!sandboxId) return;
+      // No boat webhook reaches a local Worker, so the cron moves the row from starting to running.
+      const tick = () => fetch(`${account.api}/cdn-cgi/handler/scheduled?cron=*+*+*+*+*`).catch(() => null);
+      const running = await waitFor(
+        "running",
+        async () => {
+          await tick();
+          const row = account.row(server.serverId);
+          return row?.observed_state === "running" ? row : null;
+        },
+        600_000,
+      );
+      record("boat", "the VM reaches running", true, running);
+      const host = await waitFor(
+        "claim redeemed and host published",
+        async () => {
+          const [value] = d1(
+            `SELECT h.claim_redeemed_at, r.name AS host_name, r.device_public_key IS NOT NULL AS published
+             FROM hosted_servers h
+             LEFT JOIN remote_hosts r ON r.host_id = h.server_id AND r.owner_user_id = h.owner_user_id
+             WHERE h.server_id = ${quote(server.serverId)}`,
+            hostSchema,
+          );
+          return value?.claim_redeemed_at && value.published ? value : null;
+        },
+        900_000,
+      );
+      record(
+        "boat",
+        "OpenBot in the VM redeems its claim and publishes the host with the server name",
+        host.host_name === name,
+        host,
+      );
+      const service = await boat("POST", `/sandboxes/${sandboxId}/commands`, {
+        command: "systemctl is-active openbot.service; sudo -n journalctl -u openbot.service --no-pager -n 30 -o cat",
+        timeoutSeconds: 60,
+      });
+      const output = commandSchema.safeParse(service.body).data?.stdout ?? "";
+      record("boat", "openbot.service is active in the VM", output.startsWith("active"), output.split("\n"));
+      // The claim works one time, so a server that did not store its session cannot sign in again. The
+      // app signs in before it starts the host, so 60 seconds of a clean log is a complete start.
+      const restart = await boat("POST", `/sandboxes/${sandboxId}/commands`, {
+        command: [
+          'test -s "$HOME/.config/OpenBot/openbot-central-auth-v1.bin" || { echo "no stored session"; exit 1; }',
+          "sudo -n systemctl restart openbot.service",
+          "id=$(systemctl show -p InvocationID --value openbot.service)",
+          "for _ in $(seq 1 30); do",
+          '  if sudo -n journalctl "_SYSTEMD_INVOCATION_ID=$id" -o cat --no-pager | grep -q "could not sign in"; then',
+          '    echo "sign-in failed"; exit 1',
+          "  fi",
+          "  sleep 2",
+          "done",
+          "systemctl is-active openbot.service",
+        ].join("\n"),
+        timeoutSeconds: 120,
+      });
+      const restarted = commandSchema.safeParse(restart.body).data?.stdout?.trim() ?? "";
+      record("boat", "the stored session signs the server in again after a restart", restarted === "active", {
+        output: restarted,
+      });
+      const removed = await account.request("DELETE", `v2/hosting/servers/${server.serverId}`, { confirmName: name });
+      deleted = removed.status === 204;
+      const gone = await waitFor(
+        "VM deleted",
+        async () => {
+          const response = await boat("GET", `/sandboxes/${sandboxId}`);
+          const state = sandboxSchema.safeParse(response.body).data?.sandbox.state;
+          return response.status === 404 || state === "deleted" ? { status: response.status, state } : null;
+        },
+        180_000,
+      );
+      record("boat", "delete removes the VM", deleted, {
+        status: removed.status,
+        boat: gone,
+        row: account.row(server.serverId),
+      });
+    } finally {
+      if (!deleted) await account.request("DELETE", `v2/hosting/servers/${server.serverId}`, { confirmName: name });
+    }
+  },
 };
 
 function previousSteps(): Step[] {
@@ -737,7 +856,8 @@ async function main(args: string[]) {
   const api = args[args.indexOf("--api") + 1];
   if (!args.includes("--api") || !api) throw new Error("Pass --api <local Worker origin>.");
   const chosen = SCENARIOS.filter((scenario) => args.includes(scenario));
-  const run = chosen.length > 0 ? chosen : SCENARIOS;
+  // A real VM costs money, so `boat` runs only when named.
+  const run = chosen.length > 0 ? chosen : SCENARIOS.filter((scenario) => scenario !== "boat");
   const clocks: string[] = [];
   for (const scenario of run) {
     try {

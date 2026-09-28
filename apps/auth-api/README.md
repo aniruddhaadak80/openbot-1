@@ -62,6 +62,15 @@ bunx dotenvx run -q -f apps/auth-api/.env.shared -fk .env.keys -- \
 The `portal` scenario prints a Customer Portal cancel page and then an update page, and waits until
 you use them. The report goes to `.openbot-build/stripe-flows-e2e.json`.
 
+The `boat` scenario runs only when you name it. It pays for a server, waits until OpenBot in the VM
+signs in and publishes the host, restarts the service to check the stored session, and deletes the
+server. It needs the real `BOAT_API_KEY`, a template from `bun run hosting:template` whose
+`--auth-api-url` reaches your Worker (for example a `cloudflared tunnel --url` to its port), and
+`HOSTED_SERVER_TEMPLATE` set to that template. Start the Worker with
+`__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=.trycloudflare.com`, or Vite refuses the tunnel host. A boat
+trial account refuses a server that has no auto-stop, so the create fails with `provider_billing`
+until the account has a paid boat plan.
+
 `bun run api:deploy:test` reads `.env.shared` before `.env.production`. The first file wins, so the
 test Worker gets the sandbox keys, never live keys.
 

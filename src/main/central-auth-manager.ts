@@ -728,6 +728,11 @@ export class CentralAuthManager extends EventEmitter<CentralAuthEvents> {
     }
   }
 
+  /** False when the session can live only in memory, so it would be lost at the next start. */
+  canPersistSession(): boolean {
+    return this.#options.canPersist();
+  }
+
   /**
    * Signs a new hosted server in with the single-use claim that the account server put in its VM.
    * The result names the host ID that the account server reserved for this account.

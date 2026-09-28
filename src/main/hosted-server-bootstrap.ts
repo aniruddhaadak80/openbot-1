@@ -43,7 +43,7 @@ export function takeHostedServerEnvironment(
 
 export interface HostedServerAccountOptions {
   environment: HostedServerEnvironment;
-  centralAuth: Pick<CentralAuthManager, "redeemHostedServerClaim" | "requestAuthorized">;
+  centralAuth: Pick<CentralAuthManager, "canPersistSession" | "redeemHostedServerClaim" | "requestAuthorized">;
   centralAuthInitialization: Promise<CentralAuthState>;
   teamStore: Pick<
     TeamStore,
@@ -64,6 +64,9 @@ export async function applyHostedServerAccount({
     user = state.user;
   } else {
     if (!environment.claim) throw new Error("The hosted server is signed out and has no claim.");
+    // The claim works one time. With no secret storage the session would end at the next start, and
+    // the server could not sign in again. Keep the claim for a start that has a keyring.
+    if (!centralAuth.canPersistSession()) throw new Error("The hosted server has no secret storage for its session.");
     const redeemed = await centralAuth.redeemHostedServerClaim(environment.claim);
     if (redeemed.hostId !== environment.hostId) throw new Error("The claim is for a different hosted server.");
     user = redeemed.user;

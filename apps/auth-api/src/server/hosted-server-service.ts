@@ -927,7 +927,10 @@ function parseWebhookEvent(
 
 function providerError(error: unknown): HostedServerError {
   if (!(error instanceof BoatApiError)) return "provider_error";
-  if (error.status === 402 || error.code === "billing_required") return "provider_billing";
+  // A boat trial also refuses a server with no auto-stop. Only a paid boat plan lifts that limit.
+  if (error.status === 402 || error.code === "billing_required" || error.code === "trial_auto_stop_required") {
+    return "provider_billing";
+  }
   if (error.status === 429 || error.code === "trial_machine_class_not_allowed") return "provider_limit";
   return "provider_error";
 }

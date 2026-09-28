@@ -123,18 +123,34 @@ template applies only to new servers. boat keeps at most 10 named snapshots for 
 
 On a server, `openbot-hosted-server` starts a D-Bus session, unlocks a gnome-keyring with a
 random password for each server (so `safeStorage` can keep the account session), and runs OpenBot
-under `xvfb-run` with `--password-store=gnome-libsecret`.
+under `xvfb-run` with `--password-store=gnome-libsecret`. The keyring files are in
+`~/.config/openbot-hosted/data/keyrings`, not in `~/.local/share/keyrings`: the boat image has a
+locked `default` keyring there, and a snapshot restore resets that folder after the service starts.
+OpenBot redeems the claim only when `safeStorage` works. The claim works one time, so a session
+that is only in memory would leave the server signed out after its next start.
+
+## Tested on boat
+
+The `boat` scenario of `scripts/stripe-flows-e2e.ts` (see `apps/auth-api/README.md`) passed on
+2026-09-28 with a local Worker, the Stripe sandbox and a boat trial account. It confirmed:
+
+- the builder user has passwordless `sudo`, and AppArmor is enabled in the boat VM;
+- boat runs `setupScript` for a sandbox created from a named snapshot, and systemd starts
+  `openbot.service` after a create;
+- OpenBot redeems its claim, publishes the host with the server name, and signs in again from the
+  stored session after a restart (`safeStorage` with gnome-keyring under Xvfb);
+- a delete through the Worker removes the sandbox.
+
+A boat trial account refuses a sandbox with no auto-stop (`trial_auto_stop_required`), and the
+Worker shows it as `provider_billing`. The test ran with a local two-hour TTL; the Worker needs a
+paid boat plan.
 
 ## Not confirmed
 
 These were not tested on boat. Test them before a user gets access:
 
-- that the sandbox user has passwordless `sudo` in the builder;
-- that boat runs `setupScript` for a sandbox created from a named snapshot, and that systemd
-  starts enabled units after a create and after a resume;
-- that `safeStorage` works with gnome-keyring under Xvfb;
-- that AppArmor is enabled in the boat VM (`provision.sh` skips the profile when it is not);
-- how long a resume takes after boat stops a sandbox;
+- that systemd starts enabled units after a resume, and how long a resume takes after boat stops a
+  sandbox;
 - that production Signal accepts tickets from the `test` Worker;
 - a lost response to the boat create call. The idempotency key is the host ID, so a retry returns
   the same sandbox, but no retry runs by itself;
