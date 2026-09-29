@@ -146,22 +146,42 @@ function FileReference({ text, presentation }: { text: string; presentation: Tex
   );
 }
 
+// A view cannot break across lines, so code is a row of one-line chips that touch. A line can break
+// after a space or a separator, and a long run without one breaks after this many characters.
+const CODE_PIECE_MAX_LENGTH = 12;
+
+function codePieces(text: string): string[] {
+  return (text.match(/[^\s\-/._]*(?:[\s\-/._]+|$)/gu) ?? []).flatMap((piece) => {
+    const characters = Array.from(piece);
+    if (!characters.length) return [];
+    const chunks: string[] = [];
+    for (let index = 0; index < characters.length; index += CODE_PIECE_MAX_LENGTH) {
+      chunks.push(characters.slice(index, index + CODE_PIECE_MAX_LENGTH).join(""));
+    }
+    return chunks;
+  });
+}
+
 function CodeSpan({ text, presentation }: { text: string; presentation: TextPresentation }) {
   if (isFileReference(text.trim())) return <FileReference text={text} presentation={presentation} />;
-  return (
+  const pieces = codePieces(text);
+  return sourceEntries(pieces, (piece) => piece).map(({ value: piece, offset }, index) => (
+    // Only the ends of the span are rounded, so touching pieces read as one chip.
     <View
+      key={offset}
       collapsable={false}
-      className={`max-w-full self-start rounded-xl bg-control px-1 ${presentation.type === "body-sm" ? "py-px" : "py-0.5"}`}
+      className={`max-w-full self-start bg-control ${index === 0 ? "rounded-l-xl pl-1" : ""} ${index === pieces.length - 1 ? "rounded-r-xl pr-1" : ""} ${presentation.type === "body-sm" ? "py-px" : "py-0.5"}`}
     >
       <Typography.Code
         selectable={presentation.selectable}
+        numberOfLines={1}
         className={presentation.type === "body-sm" ? "bg-transparent p-0 text-xs leading-4" : "bg-transparent p-0"}
         style={{ ...presentation.style, color: presentation.codeColor }}
       >
-        {text}
+        {piece}
       </Typography.Code>
     </View>
-  );
+  ));
 }
 
 function AgentMention({ agent, presentation }: { agent: MobileAgent; presentation: TextPresentation }) {
