@@ -53,8 +53,13 @@ async function setup() {
   const boatCalls: Call[] = [];
   const claims: string[] = [];
   let sandboxes = 0;
-  /** The next sandbox creates that boat refuses, as a boat trial does, and whether boat refuses a smaller machine. */
-  const refusals = { creates: 0, shrink: false };
+  /**
+   * The next sandbox creates that boat refuses, as a boat trial does, whether boat refuses a smaller
+   * machine, and the next creates whose answer is lost after boat made the sandbox.
+   */
+  const refusals = { creates: 0, shrink: false, lostAnswers: 0, beforeAnswer: () => {} };
+  /** boat keeps the body of a create for its idempotency key, and returns the same sandbox for the same body. */
+  const created = new Map<string, { body: string; id: string }>();
   const boatFetch = async (input: string, init: RequestInit) => {
     const url = new URL(input);
     const call = {
@@ -72,8 +77,19 @@ async function setup() {
         refusals.creates -= 1;
         return Response.json({ ok: false, code: "trial_auto_stop_required" }, { status: 400 });
       }
-      sandboxes += 1;
-      const id = `bx_${sandboxes}`;
+      const key = call.headers.get("Idempotency-Key") ?? "";
+      const earlier = created.get(key);
+      if (earlier && earlier.body !== init.body) {
+        return Response.json({ ok: false, code: "idempotency_key_reused" }, { status: 409 });
+      }
+      if (!earlier) sandboxes += 1;
+      const id = earlier?.id ?? `bx_${sandboxes}`;
+      created.set(key, { body: String(init.body), id });
+      if (refusals.lostAnswers > 0) {
+        refusals.lostAnswers -= 1;
+        throw new TypeError("fetch failed");
+      }
+      refusals.beforeAnswer();
       return Response.json({ ok: true, status: "provisioning", sandbox: { id, state: "provisioning" } });
     }
     if (refusals.shrink && call.path.endsWith("/resume") && isDynamicRecord(call.body) && call.body.type === "small") {
@@ -496,14 +512,11 @@ describe("hosted servers", () => {
     await expect(context.service.tick()).resolves.toMatchObject({ provisioned: 1, failed: 0 });
     const creates = context.sandboxCreates();
     expect(creates).toHaveLength(3);
-    // boat makes at most one sandbox for the key. Each attempt has its own claim.
+    // Each attempt sends the same key and body, so boat makes at most one sandbox.
     expect(creates.map((call) => call.headers.get("Idempotency-Key"))).toEqual(Array(3).fill(server.serverId));
-    expect(new Set(context.claims).size).toBe(3);
+    expect(new Set(creates.map((call) => JSON.stringify(call.body))).size).toBe(1);
     expect(context.state(server.serverId)).toMatchObject({ observed_state: "starting", observed_error: null });
-    await expect(context.service.redeemClaim(context.claims[0])).rejects.toMatchObject({
-      code: "hosted_claim_invalid",
-    });
-    await expect(context.service.redeemClaim(context.claims[2])).resolves.toMatchObject({ hostId: server.serverId });
+    await expect(context.service.redeemClaim(context.claims[0])).resolves.toMatchObject({ hostId: server.serverId });
 
     // A server whose setup failed and whose plan ended is not set up again until the plan is renewed.
     const failed = await context.service.create(owner, STARTER, "create-key-0000002", RETURN);
@@ -522,6 +535,52 @@ describe("hosted servers", () => {
       desired_state: "running",
       observed_state: "starting",
     });
+  });
+
+  it("keeps the sandbox of a create whose answer was lost, and lets a VM that never signed in sign in later", async () => {
+    const context = await setup();
+    const sandboxOf = (serverId: string) =>
+      context.database.prepare("SELECT provider_sandbox_id FROM hosted_servers WHERE server_id = ?").get(serverId);
+    // boat makes the sandbox, and the answers to the create and to its retry are lost.
+    context.refusals.lostAnswers = 2;
+    const server = await createPaidServer(context);
+    expect(context.state(server.serverId)).toMatchObject({ observed_state: "error", observed_error: "provider_error" });
+    context.clock.now += 11 * MINUTE;
+    await expect(context.service.tick()).resolves.toMatchObject({ provisioned: 1, failed: 0 });
+    expect(context.sandboxCreates()).toHaveLength(3);
+    expect(sandboxOf(server.serverId)).toEqual({ provider_sandbox_id: "bx_1" });
+    expect(context.state(server.serverId)).toMatchObject({ observed_state: "starting", observed_error: null });
+
+    // The VM did not sign in within the hour. Its next start makes the claim work again, one time.
+    const [claim = ""] = context.claims;
+    await context.service.handleWebhook(context.boatWebhook("sandbox.ready", "ready"));
+    context.clock.now += 61 * MINUTE;
+    await expect(context.service.tick()).resolves.toMatchObject({ idle: 1 });
+    await context.service.handleWebhook(context.boatWebhook("sandbox.archived", "archived"));
+    await expect(context.service.redeemClaim(claim)).rejects.toMatchObject({ code: "hosted_claim_invalid" });
+    await context.service.wake(owner, server.serverId);
+    await expect(context.service.redeemClaim(claim)).resolves.toMatchObject({ hostId: server.serverId });
+    context.clock.now += 11 * MINUTE;
+    await context.service.handleWebhook(context.boatWebhook("sandbox.ready", "ready"));
+    context.clock.now += 16 * MINUTE;
+    await expect(context.service.tick()).resolves.toMatchObject({ idle: 1 });
+    await context.service.handleWebhook(context.boatWebhook("sandbox.archived", "archived"));
+    await context.service.wake(owner, server.serverId);
+    await expect(context.service.redeemClaim(claim)).rejects.toMatchObject({ code: "hosted_claim_invalid" });
+
+    // The cron gave up on a create that boat answers later. The row keeps that sandbox.
+    const late = await context.service.create(owner, STARTER, "create-key-0000002", RETURN);
+    context.refusals.beforeAnswer = () => {
+      context.database
+        .prepare(
+          "UPDATE hosted_servers SET observed_state = 'error', observed_error = 'provider_error' WHERE server_id = ?",
+        )
+        .run(late.server.serverId);
+    };
+    await context.stripeSync("sub_2", "active", late.server.serverId);
+    expect(sandboxOf(late.server.serverId)).toEqual({ provider_sandbox_id: "bx_2" });
+    expect(context.state(late.server.serverId)).toMatchObject({ observed_state: "starting", observed_error: null });
+    expect(context.boatCalls.filter((call) => call.method === "DELETE")).toHaveLength(0);
   });
 
   it("moves a server to the machine of its new plan, and keeps its machine when the data does not fit", async () => {

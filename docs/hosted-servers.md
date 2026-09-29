@@ -84,8 +84,11 @@ when a server is idle or boat stops a sandbox; and `error` and `deleted`. The Wo
    `402 plan_required`.
 
    A paid server whose setup failed has no sandbox. A wake (Retry in the add server dialog) sets
-   it up again at once, and the cron does this 10 minutes after each failure. Each attempt has a
-   new claim and the same idempotency key, the host ID.
+   it up again at once, and the cron does this 10 minutes after each failure. Each attempt sends
+   the same request body and the same idempotency key, the host ID. The claim is an HMAC of the
+   host ID with `BOAT_WEBHOOK_SECRET`, so it is the same on each attempt. When a failed attempt made
+   a sandbox, boat returns that sandbox and the Worker stores it. A sandbox that a create returns
+   after the cron gave up on that create is stored too; only a delete during the create removes it.
 7. **Plan ends.** When the subscription is cancelled or unpaid, or `past_due` after its period
    end, the Worker sets `desired_state = 'stopped'` with the error `plan_ended` and stops the
    sandbox. boat saves the disk; the Worker never deletes it. "Renew plan" in Settings calls the
@@ -237,7 +240,13 @@ under `xvfb-run` with `--password-store=gnome-libsecret`. The keyring files are 
 OpenBot redeems the claim only when `safeStorage` works. After the first redeem the claim works
 for 10 more minutes, so a server whose response was lost can redeem it again; each redeem revokes the
 session of the one before. After that, a session that is only in memory would leave the server
-signed out after its next start. A new setup of the server makes a new claim.
+signed out after its next start.
+
+A VM that never signed in keeps its claim in its env file. Each start of that server makes the claim
+work again for one hour, so a VM that missed the first hour, or whose plan ended before it signed in,
+signs in at its next start. After the 10 minutes that follow the first redeem, the Worker never
+accepts the claim again. A new `BOAT_WEBHOOK_SECRET` changes each claim, so a VM that did not sign
+in before the change cannot sign in; delete that server.
 
 A start that cannot reach the account server does not use the claim. The start retry signs in
 again with backoff (30 s to 10 min) and then publishes the host.
@@ -277,13 +286,9 @@ allows only `small` and `default`, so a Pro server (`large`) needs a paid boat p
 These were not tested on boat. Test them before a user gets access:
 
 - that production Signal accepts tickets from the `test` Worker;
-- a lost response to the boat create call. The Worker sends the same request again one time, and
-  boat returns the same sandbox. When that also fails, the sandbox has a claim that the Worker
-  no longer accepts. For 24 hours, boat refuses each retry with `idempotency_key_reused`, which the
-  Worker logs. After that, a retry makes a new sandbox. An operator must delete the first one;
-- a VM that does not redeem its claim in 60 minutes, or whose plan ends before the redeem. The Worker
-  keeps only the hash of the claim, so it cannot give the same VM a new one. The server cannot
-  publish its host, and the owner must delete it;
+- a lost response to the boat create call. The Worker sends the same request again, and boat
+  returns the same sandbox. boat keeps an idempotency key for 24 hours, and the cron retries every
+  10 minutes, so a retry after 24 hours can make a second sandbox. The test uses a fake boat;
 - a sandbox that boat no longer has (`404`). The Worker keeps its ID and shows `error`, and does not
   make a new sandbox by itself: a wrong `BOAT_API_KEY` also gives `404` for each sandbox. An operator
   must check the key before a user deletes the server;

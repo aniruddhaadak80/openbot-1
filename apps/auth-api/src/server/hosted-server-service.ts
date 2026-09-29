@@ -31,7 +31,7 @@ import {
   isBoatState,
   verifyBoatWebhookSignature,
 } from "./boat-client";
-import { randomToken, sha256 } from "./crypto";
+import { hmacSha256, randomToken, sha256 } from "./crypto";
 import { PERSISTENT_SESSION_EXPIRES_AT } from "./session-policy";
 import type { AuthUser, WorkerBindings } from "./types";
 
@@ -757,12 +757,13 @@ export class HostedServerService {
   async #provision(row: HostedServerRow): Promise<void> {
     const boat = this.#boat;
     const template = this.#template;
+    const secret = this.#webhookSecret;
     // Thrown before the row changes, so the webhook retry or the cron provisions it later.
-    if (!boat || !template) {
+    if (!boat || !template || !secret) {
       throw new HostedServerServiceError(503, "hosting_not_configured", "Hosted servers are not configured.");
     }
-    // The claim is made now, so its lifetime counts from the start of the sandbox, not from the payment page.
-    const claim = randomToken();
+    // The claim works from now, so its lifetime counts from the start of the sandbox, not from the payment page.
+    const claim = await hostedClaim(secret, row.server_id);
     const now = this.#now();
     const claimed = await this.#database
       .prepare(
@@ -783,7 +784,7 @@ export class HostedServerService {
       idempotencyKey: row.server_id,
     };
     try {
-      // The same idempotency key and claim make one retry safe after a network failure.
+      // The same idempotency key and request body make a retry safe: boat returns the sandbox that it made.
       const sandbox = await boat.createSandbox(request).catch((error: unknown) => {
         if (error instanceof BoatApiError && error.code === "network_error") return boat.createSandbox(request);
         throw error;
@@ -795,8 +796,8 @@ export class HostedServerService {
         )
         .bind(sandbox.id, isUsable(sandbox.state) ? "running" : "starting", this.#now(), row.server_id)
         .run();
-      if (stored.meta.changes !== 1) {
-        // The cron gave up on this create, so no row owns the sandbox. It costs money until it is deleted.
+      if (stored.meta.changes !== 1 && !(await this.#adopt(row, sandbox, claim))) {
+        // The server was deleted during the create. The sandbox costs money until it is deleted.
         console.warn("Hosted server sandbox has no row.", { serverId: row.server_id });
         await boat.deleteSandbox(sandbox.id).catch((error: unknown) => {
           console.warn("Hosted server sandbox delete failed.", {
@@ -821,6 +822,32 @@ export class HostedServerService {
         .run();
       this.#track(row, { name: "hosted_server_action", action: "setup_failed", plan: row.plan, error: failed });
     }
+  }
+
+  /**
+   * Stores a sandbox whose create the cron gave up on. A delete during the create does not keep it.
+   * The claim works again, so the VM can sign in, and the VM restarts until it does.
+   */
+  async #adopt(row: HostedServerRow, sandbox: { id: string; state: BoatSandboxState }, claim: string) {
+    const now = this.#now();
+    const adopted = await this.#database
+      .prepare(
+        `UPDATE hosted_servers SET provider_sandbox_id = ?, observed_state = ?,
+           observed_error = CASE WHEN observed_error = 'plan_ended' THEN observed_error ELSE NULL END,
+           claim_token_hash = CASE WHEN auth_session_id IS NULL THEN ? ELSE claim_token_hash END,
+           claim_expires_at = CASE WHEN auth_session_id IS NULL THEN ? ELSE claim_expires_at END, updated_at = ?
+         WHERE server_id = ? AND observed_state = 'error' AND provider_sandbox_id IS NULL AND desired_state != 'deleted'`,
+      )
+      .bind(
+        sandbox.id,
+        isUsable(sandbox.state) ? "running" : "starting",
+        await sha256(claim),
+        now + CLAIM_TTL_MS,
+        now,
+        row.server_id,
+      )
+      .run();
+    return adopted.meta.changes === 1;
   }
 
   /**
@@ -876,8 +903,8 @@ export class HostedServerService {
 
   /**
    * Sets up a paid server again after its setup failed. It has no sandbox, so it has no data. The retry
-   * sends the same idempotency key with a new claim. When the failed call made a sandbox, boat refuses
-   * the new request body (`idempotency_key_reused`) for 24 hours, so no second sandbox is made then.
+   * sends the same idempotency key and request body. When the failed call made a sandbox, boat returns
+   * that sandbox, and the row stores it.
    */
   async #retrySetup(row: HostedServerRow): Promise<boolean> {
     if (row.desired_state !== "running" || row.observed_state !== "error" || row.provider_sandbox_id) return false;
@@ -1058,13 +1085,28 @@ export class HostedServerService {
     const now = this.#now();
     // A stopping server starts again when the provider reports that it stopped.
     if (row.observed_state !== "stopped" && !(row.observed_state === "error" && row.provider_sandbox_id)) return;
+    // A VM that never signed in has its claim in its env file. The claim works again for this start.
+    const claimHash = this.#webhookSecret ? await sha256(await hostedClaim(this.#webhookSecret, row.server_id)) : null;
     const waking = await this.#database
       .prepare(
         `UPDATE hosted_servers SET observed_state = 'waking', observed_error = NULL,
-           last_wake_reason = ?, provider_event_at = ?, last_active_at = ?, lease_until = ?, updated_at = ?
+           last_wake_reason = ?, provider_event_at = ?, last_active_at = ?, lease_until = ?,
+           claim_token_hash = CASE WHEN auth_session_id IS NULL THEN ? ELSE claim_token_hash END,
+           claim_expires_at = CASE WHEN auth_session_id IS NULL THEN ? ELSE claim_expires_at END,
+           updated_at = ?
          WHERE server_id = ? AND observed_state = ? AND desired_state = 'running'`,
       )
-      .bind(reason, now, now, now + LEASE_TTL_SECONDS * 1000, now, row.server_id, row.observed_state)
+      .bind(
+        reason,
+        now,
+        now,
+        now + LEASE_TTL_SECONDS * 1000,
+        claimHash,
+        now + CLAIM_TTL_MS,
+        now,
+        row.server_id,
+        row.observed_state,
+      )
       .run();
     if (waking.meta.changes !== 1) return;
     if (reason !== "create") {
@@ -1226,6 +1268,15 @@ function summary(row: HostedServerRow): HostedServerSummary {
 }
 
 /** `openbot-{plan}-{email}-{first 8 characters of the server ID}`, in the characters of a boat name. */
+/**
+ * The claim of a server is the same on each call, so a create retry sends the same request body and
+ * boat returns the sandbox that it made. The Worker stores only its hash, and accepts it only while
+ * the row says so: from a create or a start of a VM that never signed in, until it expires.
+ */
+async function hostedClaim(secret: string, serverId: string): Promise<string> {
+  return hmacSha256(secret, `openbot-hosted-claim:v1:${serverId}`);
+}
+
 export function sandboxName(plan: BillingPlanId, email: string, serverId: string): string {
   const slug = (value: string) =>
     value
