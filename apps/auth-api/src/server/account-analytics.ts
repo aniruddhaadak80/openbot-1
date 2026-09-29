@@ -22,7 +22,7 @@ const ANALYTICS_SCHEMA_VERSION = 8;
 const SEND_TIMEOUT_MS = 5_000;
 const ACCOUNT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/u;
 
-export const BILLING_ACTIONS = [
+const BILLING_ACTIONS = [
   "checkout_started",
   "checkout_expired",
   "plan_started",
@@ -36,7 +36,7 @@ export const BILLING_ACTIONS = [
 ] as const;
 export type BillingAction = (typeof BILLING_ACTIONS)[number];
 
-export const HOSTED_SERVER_ACTIONS = [
+const HOSTED_SERVER_ACTIONS = [
   "provisioned",
   "setup_failed",
   "idle_stopped",
@@ -46,7 +46,7 @@ export const HOSTED_SERVER_ACTIONS = [
   "renewed",
   "deleted",
 ] as const;
-export type HostedServerAction = (typeof HOSTED_SERVER_ACTIONS)[number];
+type HostedServerAction = (typeof HOSTED_SERVER_ACTIONS)[number];
 
 const PORTAL_FLOWS = ["manage", "update", "cancel"] as const;
 const WAKE_REASONS = ["message", "restart"] as const;
