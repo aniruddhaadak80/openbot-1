@@ -3,7 +3,10 @@
 A hosted server is an OpenBot server that runs in a [boat](https://boat.dev) sandbox, so it works
 when the user's computer is off. Each server is one boat sandbox for one account. The sandbox runs
 the Linux build of OpenBot under Xvfb. The server runs while it is in use. After 15 minutes with no
-use, the Worker stops it and keeps its data, and the next client starts it again.
+use, the Worker stops it and keeps its data, and the next client starts it again. A connected client
+counts as use, also a member's desktop app that is open in the background: the app keeps a
+connection to each stored server and starts a stopped one again. This is a product decision: a fast
+answer is more important than the cost of a server that stays on.
 
 The Worker enables hosted servers only when it has the boat, claim and Stripe secrets and
 `HOSTED_SERVER_TEMPLATE`, and only for the account IDs in `HOSTED_SERVERS_ALLOWED_USER_IDS` (`*`
