@@ -8,7 +8,9 @@ import {
   isBillingAmount,
   isStripeCheckoutUrl,
 } from "./billing";
+import { INPUT_LIMITS } from "./input-limits";
 import { isBoolean, isDynamicRecord, isNumber, isOneOf, isString } from "./runtime-values";
+import { slugifyTeamServerName } from "./validation";
 
 /** The provider machine sizes, from the boat machine table (docs.boat.dev/machines). */
 export const HOSTED_SERVER_SIZES = {
@@ -57,7 +59,17 @@ export const HOSTED_SERVER_ERRORS = [
 
 export type HostedServerError = (typeof HOSTED_SERVER_ERRORS)[number];
 
-export const HOSTED_SERVER_NAME_MAX_LENGTH = 80;
+/**
+ * Returns the trimmed name, or null for a name that the team store of the server refuses. The server
+ * cannot publish its host with such a name.
+ */
+export function parseHostedServerName(value: string): string | null {
+  const name = value.trim();
+  if (name.length < INPUT_LIMITS.serverNameMin || name.length > INPUT_LIMITS.serverName || /\p{Cc}/u.test(name)) {
+    return null;
+  }
+  return slugifyTeamServerName(name).length >= INPUT_LIMITS.serverNameMin ? name : null;
+}
 
 /** "Contact us" in the add server dialog, for a plan that the dialog does not have. */
 export const HOSTED_SERVER_CONTACT_URL = "mailto:hello@openbot.run";
@@ -107,13 +119,17 @@ export function parseHostedServerSummary(value: unknown): HostedServerSummary | 
     !isOneOf(BILLING_PLAN_IDS, value.plan) ||
     !isOneOf(BILLING_INTERVALS, value.interval) ||
     !isOneOf(BILLING_CURRENCIES, value.currency) ||
-    !isHostedServerState(value.state) ||
-    !(value.error === null || isOneOf(HOSTED_SERVER_ERRORS, value.error)) ||
+    !isString(value.state) ||
+    !(value.error === null || isString(value.error)) ||
     !isString(value.createdAt) ||
     !isString(value.updatedAt)
   ) {
     return null;
   }
+  // A state or an error that a newer Worker added shows as an error, so an older app still lists the server.
+  const state: HostedServerState = isHostedServerState(value.state) ? value.state : "error";
+  const error: HostedServerError | null =
+    state !== value.state ? "provider_error" : isOneOf(HOSTED_SERVER_ERRORS, value.error) ? value.error : null;
   return {
     serverId: value.serverId,
     name: value.name,
@@ -121,8 +137,8 @@ export function parseHostedServerSummary(value: unknown): HostedServerSummary | 
     plan: value.plan,
     interval: value.interval,
     currency: value.currency,
-    state: value.state,
-    error: value.error,
+    state,
+    error,
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,
   };
@@ -218,8 +234,8 @@ export function parseCreateHostedServerInput(value: unknown): CreateHostedServer
   ) {
     return null;
   }
-  const name = value.name.trim();
-  if (!name || name.length > HOSTED_SERVER_NAME_MAX_LENGTH || /\p{Cc}/u.test(name)) return null;
+  const name = parseHostedServerName(value.name);
+  if (!name) return null;
   if (!isString(value.requestId) || !REQUEST_ID_PATTERN.test(value.requestId)) return null;
   return { name, plan: value.plan, interval: value.interval, currency: value.currency, requestId: value.requestId };
 }
@@ -274,6 +290,6 @@ export function parseHostedServerCatalog(value: unknown): HostedServerCatalog | 
 /** Returns null for a value that is not a valid delete request. */
 export function parseDeleteHostedServerInput(value: unknown): DeleteHostedServerInput | null {
   if (!isDynamicRecord(value) || !isString(value.serverId) || !isString(value.confirmName)) return null;
-  if (!value.serverId || value.confirmName.length > HOSTED_SERVER_NAME_MAX_LENGTH) return null;
+  if (!value.serverId || value.confirmName.length > INPUT_LIMITS.serverName) return null;
   return { serverId: value.serverId, confirmName: value.confirmName };
 }

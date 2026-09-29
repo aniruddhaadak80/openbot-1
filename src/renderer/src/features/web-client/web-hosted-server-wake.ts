@@ -59,7 +59,10 @@ export function createWebHostedServerWake(accountFetch: typeof fetch, now: () =>
     }
     if (!response.ok) {
       attempts.delete(hostId);
-      notHostedAt.set(hostId, time);
+      // Not a hosted server of this account, or a server whose plan ended: a wake cannot start it.
+      // Any other failure can pass, so the next failure asks again.
+      if (response.status === 404) notHostedAt.set(hostId, time);
+      if (response.status === 402) gaveUpAt.set(hostId, time);
       return false;
     }
     const server = parseHostedServerSummary(await response.json().catch(() => null));

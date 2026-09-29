@@ -232,10 +232,21 @@ export class BillingService {
     return { sessionId: session.id, url: session.url };
   }
 
-  /** Closes a Checkout page. `paid` when the user paid on it, so no second page must open. */
+  /**
+   * Closes a Checkout page. `paid` when the user paid on it, so no second page must open. The plan of a
+   * paid page is stored now: its webhook can be late, or can fail each time.
+   */
   async closeCheckout(sessionId: string): Promise<"closed" | "paid"> {
-    const status = await this.#stripeCall(() => this.#stripe.expireCheckoutSession(sessionId));
-    return status === "complete" ? "paid" : "closed";
+    const session = await this.#stripeCall(() => this.#stripe.expireCheckoutSession(sessionId));
+    if (session.status !== "complete") return "closed";
+    const subscriptionId = session.subscription;
+    if (subscriptionId) {
+      // The webhook or the next close stores it. A Stripe failure is logged by `#stripeCall`.
+      await this.#syncSubscription(subscriptionId).catch(() => {
+        console.warn("billing: paid Checkout sync failed", { subscriptionId });
+      });
+    }
+    return "paid";
   }
 
   /**

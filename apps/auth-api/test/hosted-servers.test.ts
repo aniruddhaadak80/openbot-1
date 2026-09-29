@@ -373,9 +373,14 @@ describe("hosted servers", () => {
     const context = await setup();
     const paid = await context.service.create(owner, STARTER, "create-key-0000001", RETURN);
     const unpaid = await context.service.create(owner, STARTER, "create-key-0000002", RETURN);
-    // Paid at the last minute: the Stripe webhook has not come yet.
+    // Paid at the last minute, and each webhook delivery fails.
     const paidLate = await context.service.create(owner, STARTER, "create-key-0000003", RETURN);
     context.stripe.sessions.set("cs_3", "complete");
+    context.stripe.sessionSubscriptions.set("cs_3", "sub_late");
+    context.stripe.subscriptions.set(
+      "sub_late",
+      subscription("sub_late", "active", paidLate.server.serverId, "cus_1", context.clock.now, "starter"),
+    );
     // The webhook stored the subscription, but the hosting step failed.
     context.database
       .prepare(
@@ -402,15 +407,14 @@ describe("hosted servers", () => {
       desired_state: "deleted",
       observed_state: "deleted",
     });
-    expect(context.state(paidLate.server.serverId)).toMatchObject({
-      desired_state: "running",
-      observed_state: "awaiting_payment",
-    });
+    // The paid page gives the plan that no webhook stored, so the server is set up.
+    expect(context.state(paidLate.server.serverId)).toMatchObject({ desired_state: "running" });
+    expect(context.sandboxCreates()).toHaveLength(2);
     // A server with a plan that ended keeps its data.
     await expect(context.service.list(owner)).resolves.toMatchObject({
       servers: [
         { serverId: paid.server.serverId, state: "stopping" },
-        { serverId: paidLate.server.serverId, state: "awaiting_payment" },
+        { serverId: paidLate.server.serverId, state: "starting" },
       ],
     });
   });
@@ -724,6 +728,8 @@ class FakeStripe {
   readonly subscriptions = new Map<string, unknown>();
   /** Checkout session ID → status. */
   readonly sessions = new Map<string, string>();
+  /** Checkout session ID → the subscription that its payment started. */
+  readonly sessionSubscriptions = new Map<string, string>();
   readonly checkouts: URLSearchParams[] = [];
   readonly cancelled: string[] = [];
   customersCreated = 0;
@@ -755,7 +761,12 @@ class FakeStripe {
     }
     const session = /^\/v1\/checkout\/sessions\/([^/]+)$/u.exec(url.pathname)?.[1];
     if (method === "GET" && session) {
-      return Response.json({ id: session, url: null, status: this.sessions.get(session) ?? null });
+      return Response.json({
+        id: session,
+        url: null,
+        status: this.sessions.get(session) ?? null,
+        subscription: this.sessionSubscriptions.get(session) ?? null,
+      });
     }
     const subscriptionId = /^\/v1\/subscriptions\/([^/]+)$/u.exec(url.pathname)?.[1];
     const stored = subscriptionId ? this.subscriptions.get(subscriptionId) : undefined;

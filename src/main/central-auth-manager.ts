@@ -751,7 +751,9 @@ export class CentralAuthManager extends EventEmitter<CentralAuthEvents> {
       this.#teamHostTokens.clear();
     }
     this.#sessionToken = redeemed.sessionToken;
-    await this.#writeStoredSession();
+    // The claim is spent. A session that is not stored ends at the next start, so a failed write fails
+    // the redeem. The start retry redeems the claim again in its retry window.
+    await this.#writeStoredSession({ required: true });
     const user = this.#resolveUserAvatar(redeemed.user);
     this.#setState({ status: "signed_in", user });
     return { hostId: redeemed.hostId, name: redeemed.name, user };
@@ -885,20 +887,21 @@ export class CentralAuthManager extends EventEmitter<CentralAuthEvents> {
     };
   }
 
-  #writeStoredSession(): Promise<void> {
+  #writeStoredSession(options: { required?: boolean } = {}): Promise<void> {
     // Serialized: two writes racing inside their filesystem awaits would let the earlier
     // one rename its snapshot over the later one, restoring a session the user has left.
     this.#sessionWriteChain = this.#sessionWriteChain.then(
-      () => this.#writeStoredSessionNow(),
-      () => this.#writeStoredSessionNow(),
+      () => this.#writeStoredSessionNow(options.required === true),
+      () => this.#writeStoredSessionNow(options.required === true),
     );
     return this.#sessionWriteChain;
   }
 
-  async #writeStoredSessionNow(): Promise<void> {
+  async #writeStoredSessionNow(required: boolean): Promise<void> {
     if (!this.#sessionToken) return;
     if (!this.#options.canPersist()) {
       await rm(this.#options.storagePath, { force: true });
+      if (required) throw new Error("The session could not be stored.");
       return;
     }
     const temporaryPath = `${this.#options.storagePath}.${randomUUID()}.tmp`;
@@ -913,8 +916,9 @@ export class CentralAuthManager extends EventEmitter<CentralAuthEvents> {
       await writeFile(temporaryPath, encrypted, { mode: 0o600 });
       await chmod(temporaryPath, 0o600);
       await rename(temporaryPath, this.#options.storagePath);
-    } catch {
+    } catch (error) {
       await Promise.allSettled([rm(this.#options.storagePath, { force: true }), rm(temporaryPath, { force: true })]);
+      if (required) throw error;
     } finally {
       await Promise.allSettled([rm(temporaryPath, { force: true })]);
     }

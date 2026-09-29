@@ -59,17 +59,41 @@ interface AddServerState {
  * The desktop main process and the web client open the page, so this view never gets its URL.
  */
 export function AddServerOverlay(props: AddServerOverlayProps) {
+  /**
+   * One key for each choice, kept while its server waits for the payment. A second click on the same
+   * plan, also after the dialog closed, then opens the same server and not a second one.
+   */
+  const requestIds = new Map<string, RequestKey>();
+  /** A return from the payment page whose first read failed. The next opening shows its setup. */
+  let pendingResume: AddServerResume | null = null;
   return (
     <Show when={props.open}>
-      <AddServerSession {...props} />
+      <AddServerSession
+        {...props}
+        resume={props.resume ?? pendingResume}
+        requestIds={requestIds}
+        onPendingResume={(resume) => {
+          pendingResume = resume;
+        }}
+      />
     </Show>
   );
 }
 
-function AddServerSession(props: AddServerOverlayProps) {
+interface RequestKey {
+  requestId: string;
+  /** Null until the account server answers. */
+  serverId: string | null;
+}
+
+function AddServerSession(
+  props: AddServerOverlayProps & {
+    requestIds: Map<string, RequestKey>;
+    onPendingResume: (resume: AddServerResume | null) => void;
+  },
+) {
   const [state, setState] = createStore<AddServerState>({ plans: null, serverCount: 0, server: null, paid: false });
-  /** One key for each choice. A retry after a lost response sends the same key. */
-  const requestIds = new Map<string, string>();
+  const requestIds = untrack(() => props.requestIds);
   const resume = untrack(() => props.resume) ?? null;
   /** A read can take longer than the poll interval. The next tick then skips, so reads do not overlap. */
   let refreshing = false;
@@ -80,6 +104,13 @@ function AddServerSession(props: AddServerOverlayProps) {
     try {
       const [catalog, list] = await Promise.all([props.calls.plans(), props.calls.list()]);
       const resumed = resume ? list.servers.find((server) => server.serverId === resume.serverId) : undefined;
+      for (const [choice, key] of requestIds) {
+        const unpaid = list.servers.some(
+          (server) => server.serverId === key.serverId && server.state === "awaiting_payment",
+        );
+        if (key.serverId && !unpaid) requestIds.delete(choice);
+      }
+      props.onPendingResume(null);
       setState((draft) => {
         draft.plans = hostedServerPlansFromCatalog(catalog);
         draft.serverCount = list.servers.length;
@@ -90,6 +121,7 @@ function AddServerSession(props: AddServerOverlayProps) {
       const text = currentText();
       const title = text.t("settings.hostedServers.loadFailed");
       toast.error(title, { description: text.errorMessage(error, title) });
+      if (resume) props.onPendingResume(resume);
       props.onClose();
     }
   }
@@ -155,9 +187,16 @@ function AddServerSession(props: AddServerOverlayProps) {
     const interval: BillingInterval = input.billing === "yearly" ? "year" : "month";
     const currency = HOSTED_BILLING_CURRENCY[input.currency];
     const choice = `${input.plan}:${interval}:${currency}`;
-    const requestId = requestIds.get(choice) ?? crypto.randomUUID();
-    requestIds.set(choice, requestId);
-    const server = await props.calls.create({ name: nextName(), plan: input.plan, interval, currency, requestId });
+    const key = requestIds.get(choice) ?? { requestId: crypto.randomUUID(), serverId: null };
+    requestIds.set(choice, key);
+    const server = await props.calls.create({
+      name: nextName(),
+      plan: input.plan,
+      interval,
+      currency,
+      requestId: key.requestId,
+    });
+    key.serverId = server.serverId;
     setState((draft) => {
       draft.server = server;
       draft.paid = false;

@@ -9,7 +9,6 @@ import {
 } from "@openbot/contracts/billing";
 import {
   HOSTED_PLAN_SIZE,
-  HOSTED_SERVER_NAME_MAX_LENGTH,
   type HostedServerCatalog,
   type HostedServerCheckout,
   type HostedServerClaim,
@@ -18,6 +17,7 @@ import {
   type HostedServerSize,
   type HostedServerState,
   type HostedServerSummary,
+  parseHostedServerName,
 } from "@openbot/contracts/hosted-servers";
 import { isDynamicRecord, isOneOf, isString } from "@openbot/contracts/runtime-values";
 import { type AccountAnalytics, type AccountAnalyticsEvent, NO_ACCOUNT_ANALYTICS } from "./account-analytics";
@@ -367,9 +367,9 @@ export class HostedServerService {
         .bind(now, now, row.server_id)
         .run();
       // A server that still stops starts again when the provider reports that it stopped.
-      await this.#wake(await this.#requireRow(serverId), "message");
+      await this.#wakeForClient(await this.#requireRow(serverId));
     } else if (!(await this.#retrySetup(row))) {
-      await this.#wake(row, "message");
+      await this.#wakeForClient(row);
     }
     const current = await this.#requireRow(serverId);
     // A client asks for a start because it cannot reach the server. When the row says it runs, a lost
@@ -657,7 +657,7 @@ export class HostedServerService {
     const previous = row.checkout_session_id;
     // Only one page can be open, so a user cannot pay twice for one server.
     if (previous && (await billing.closeCheckout(previous)) === "paid") {
-      return { server: summary(row), checkoutUrl: null };
+      return { server: summary(await this.#requireRow(row.server_id)), checkoutUrl: null };
     }
     const session = await billing.createCheckout({
       user: { id: user.id, email: user.email },
@@ -1007,14 +1007,21 @@ export class HostedServerService {
       if (await this.#openPlanExists(row)) throw billingFailed();
       return;
     }
+    // A payment that finished just now keeps the server, so the owner does not lose it with no refund
+    // before they see it. A payment on this page after the close is cancelled by `onSubscriptionSynced`.
+    if (row.checkout_session_id && (await this.#closeCheckout(row.checkout_session_id)) === "paid") {
+      throw new HostedServerServiceError(
+        409,
+        "hosted_server_paid",
+        "The payment for this server finished. Delete it again to cancel the plan with no refund.",
+      );
+    }
     try {
       await billing.cancelServerPlans(row.owner_user_id, row.server_id);
     } catch (error) {
       console.warn("Hosted server plan cancel failed.", { serverId: row.server_id, error: safeErrorCode(error) });
       throw billingFailed();
     }
-    // A payment on this page after the delete is cancelled by `onSubscriptionSynced`.
-    if (row.checkout_session_id) await this.#closeCheckout(row.checkout_session_id);
   }
 
   async #openPlanExists(row: HostedServerRow): Promise<boolean> {
@@ -1028,12 +1035,22 @@ export class HostedServerService {
     return open !== null;
   }
 
-  async #closeCheckout(sessionId: string): Promise<void> {
+  async #closeCheckout(sessionId: string): Promise<"closed" | "paid" | null> {
     try {
-      await this.#billing?.closeCheckout(sessionId);
+      return (await this.#billing?.closeCheckout(sessionId)) ?? null;
     } catch (error) {
       // The page closes by itself after 30 minutes.
       console.warn("Checkout close failed.", { error: safeErrorCode(error) });
+      return null;
+    }
+  }
+
+  /** The row keeps the reason of a failed resume, so the client gets it in the summary, not as a 500. */
+  async #wakeForClient(row: HostedServerRow): Promise<void> {
+    try {
+      await this.#wake(row, "message");
+    } catch (error) {
+      console.warn("Hosted server wake failed.", { serverId: row.server_id, error: safeErrorCode(error) });
     }
   }
 
@@ -1271,9 +1288,8 @@ function safeErrorCode(error: unknown): string {
 }
 
 function serverName(value: unknown): string {
-  if (!isString(value)) throw invalid("name");
-  const name = value.trim();
-  if (!name || name.length > HOSTED_SERVER_NAME_MAX_LENGTH || /\p{Cc}/u.test(name)) throw invalid("name");
+  const name = isString(value) ? parseHostedServerName(value) : null;
+  if (!name) throw invalid("name");
   return name;
 }
 

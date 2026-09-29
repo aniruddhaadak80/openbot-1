@@ -12,7 +12,7 @@ RuntimeDirectory=openbot
 RuntimeDirectoryMode=0700
 Environment=XDG_RUNTIME_DIR=/run/openbot
 ExecStart=/opt/OpenBot/hosted/openbot-hosted-server
-Restart=on-failure
+Restart=always
 RestartSec=10
 TimeoutStopSec=60
 

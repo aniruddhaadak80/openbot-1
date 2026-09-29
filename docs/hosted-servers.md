@@ -108,9 +108,11 @@ when a server is idle or boat stops a sandbox; and `error` and `deleted`. The Wo
    plan change. When the data does not fit a smaller machine, boat refuses it
    (`409 type_too_small`); the server then starts on its old machine, and the Worker does not try
    again until the next plan change.
-9. **Delete.** `DELETE /v2/hosting/servers/:id` with `{confirmName}`. The Worker first cancels the
-   open plan now, with no refund. A Stripe failure stops the delete (502), so the user does not pay
-   for a deleted server. Then it deletes the sandbox and its Remote host. The D1 row stays with `desired_state = 'deleted'`, so a sandbox is never
+9. **Delete.** `DELETE /v2/hosting/servers/:id` with `{confirmName}`. The Worker first closes the
+   open Checkout page. When the user paid on it just now, the Worker keeps the server and answers
+   `409 hosted_server_paid`, so the owner sees the server before a second delete cancels the plan.
+   Then it cancels the open plan now, with no refund. A Stripe failure stops the delete (502), so
+   the user does not pay for a deleted server. Then it deletes the sandbox and its Remote host. The D1 row stays with `desired_state = 'deleted'`, so a sandbox is never
    left without a record.
 
 ## Members
@@ -130,15 +132,22 @@ with `getServerEntitlement` when a member joins or is reactivated, and refuses a
 
 ## Configure the test Worker
 
-`HOSTED_SERVERS_ENABLED` is `true` in `env.test` of `apps/auth-api/wrangler.jsonc`. Set the rest
-with `wrangler secret put <name> --env test` from `apps/auth-api`:
+`HOSTED_SERVERS_ENABLED` is `true` in `env.test` of `apps/auth-api/wrangler.jsonc`.
+`bun run api:deploy:test` sets `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `BOAT_API_KEY` and
+`BOAT_WEBHOOK_SECRET` from the encrypted `apps/auth-api/.env.shared` on each deploy, so a value that
+you set by hand for these four is replaced. Set the rest with `wrangler secret put <name> --env test`
+from `apps/auth-api`:
 
 | Name | Value |
 | --- | --- |
-| `BOAT_API_KEY` | A boat key limited to sandbox create, get, list, update, stop, resume and delete. The Worker uses update (`PATCH`) for the lease and the name. Do not give it file, command, prompt or desktop access: this key must not read user data. |
-| `BOAT_WEBHOOK_SECRET` | The signing secret of the boat webhook below. |
 | `HOSTED_SERVER_TEMPLATE` | The named snapshot from the template build, such as `openbot-server-0-9-0`. |
 | `HOSTED_SERVERS_ALLOWED_USER_IDS` | Comma-separated account IDs that can create servers. |
+
+The `BOAT_API_KEY` in `.env.shared` is the development key of the boat test account. It also has
+command access, because the e2e script (`scripts/stripe-flows-e2e.ts`) reads the VM with it. Use it
+only with test data. The production key must be a boat key limited to sandbox create, get, list,
+update, stop, resume and delete. The Worker uses update (`PATCH`) for the lease and the name. Do not
+give it file, command, prompt or desktop access: this key must not read user data.
 
 Register a boat webhook to `https://<test Worker origin>/v2/hosting/boat/webhook` for
 `sandbox.ready`, `sandbox.error`, `sandbox.archived` and `sandbox.hydrated`. The Worker checks the
@@ -272,6 +281,12 @@ These were not tested on boat. Test them before a user gets access:
   boat returns the same sandbox. When that also fails, the sandbox has a claim that the Worker
   no longer accepts. For 24 hours, boat refuses each retry with `idempotency_key_reused`, which the
   Worker logs. After that, a retry makes a new sandbox. An operator must delete the first one;
+- a VM that does not redeem its claim in 60 minutes, or whose plan ends before the redeem. The Worker
+  keeps only the hash of the claim, so it cannot give the same VM a new one. The server cannot
+  publish its host, and the owner must delete it;
+- a sandbox that boat no longer has (`404`). The Worker keeps its ID and shows `error`, and does not
+  make a new sandbox by itself: a wrong `BOAT_API_KEY` also gives `404` for each sandbox. An operator
+  must check the key before a user deletes the server;
 - the vCPU, memory and disk of boat `large`;
 - a downgrade that boat refuses with `type_too_small`. The test uses a fake boat;
 - the disk of each size. The root file system showed 69 GB on `small` and on `default`, not the 12 GB

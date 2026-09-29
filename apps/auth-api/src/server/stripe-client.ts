@@ -33,7 +33,15 @@ const stripeErrorSchema = z.object({
 
 const sessionSchema = z.object({ id: z.string(), url: z.string().nullable() });
 const customerSchema = z.object({ id: z.string(), deleted: z.boolean().optional() });
-const checkoutSessionSchema = z.object({ id: z.string(), url: z.string().nullable(), status: z.string().nullable() });
+const checkoutSessionSchema = z.object({
+  id: z.string(),
+  url: z.string().nullable(),
+  status: z.string().nullable(),
+  // Not expanded: the ID of the subscription that a paid page started.
+  subscription: z.string().nullable().optional(),
+});
+
+export type StripeCheckoutSession = z.infer<typeof checkoutSessionSchema>;
 
 const priceSchema = z.object({
   id: z.string(),
@@ -140,10 +148,18 @@ export class StripeClient {
     return (await this.request("POST", "/v1/customers", body, customerSchema, idempotencyKey)).id;
   }
 
-  /** True when the customer was deleted in Stripe. Stripe still returns a deleted customer, with `deleted`. */
+  /**
+   * True when the customer was deleted in Stripe. Stripe still returns a deleted customer, with
+   * `deleted`. A customer of another Stripe account, or of test data that was reset, does not exist.
+   */
   async isCustomerDeleted(customerId: string): Promise<boolean> {
     const path = `/v1/customers/${encodeURIComponent(customerId)}`;
-    return (await this.request("GET", path, null, customerSchema)).deleted === true;
+    try {
+      return (await this.request("GET", path, null, customerSchema)).deleted === true;
+    } catch (error) {
+      if (error instanceof StripeRequestError && error.status === 404) return true;
+      throw error;
+    }
   }
 
   /**
@@ -181,16 +197,16 @@ export class StripeClient {
   }
 
   /**
-   * Closes a Checkout page. Returns the final status: `expired`, or `complete` for a page that the user
-   * paid. Stripe refuses to expire a session that is not open, so the service then reads its status.
+   * Closes a Checkout page. Returns the page in its final status: `expired`, or `complete` for a page
+   * that the user paid. Stripe refuses to expire a session that is not open, so the service then reads it.
    */
-  async expireCheckoutSession(sessionId: string): Promise<string | null> {
+  async expireCheckoutSession(sessionId: string): Promise<StripeCheckoutSession> {
     const path = `/v1/checkout/sessions/${encodeURIComponent(sessionId)}`;
     try {
-      return (await this.request("POST", `${path}/expire`, new URLSearchParams(), checkoutSessionSchema)).status;
+      return await this.request("POST", `${path}/expire`, new URLSearchParams(), checkoutSessionSchema);
     } catch (error) {
       if (!(error instanceof StripeRequestError) || error.status !== 400) throw error;
-      return (await this.request("GET", path, null, checkoutSessionSchema)).status;
+      return this.request("GET", path, null, checkoutSessionSchema);
     }
   }
 

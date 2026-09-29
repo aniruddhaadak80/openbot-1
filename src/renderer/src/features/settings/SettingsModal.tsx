@@ -273,7 +273,8 @@ export function SettingsModal(props: SettingsModalProps) {
 
   // The Dynamic Island exists only on macOS, so other platforms get no tab for it.
   const isMac = () => props.appInfo?.platform === "darwin";
-  const hostedServersShown = () => hostedServers.state.available;
+  // An account that lost access to hosting still sees its servers, so it can delete or start them.
+  const hostedServersShown = () => hostedServers.state.available || hostedServers.state.servers.length > 0;
   const visibleNavItems = () =>
     navItems.filter(
       (item) =>
@@ -447,7 +448,10 @@ export function SettingsModal(props: SettingsModalProps) {
         </Tabs.Content>
         <Show when={hostedServersShown()}>
           <Tabs.Content value="hosted-servers" class="settings-modal-tab-panel" data-tab="hosted-servers">
-            <SettingsHostedServersTab store={hostedServers} onAddServer={props.onAddHostedServer} />
+            <SettingsHostedServersTab
+              store={hostedServers}
+              onAddServer={hostedServers.state.available ? props.onAddHostedServer : undefined}
+            />
           </Tabs.Content>
         </Show>
       </SettingsDialogShell>

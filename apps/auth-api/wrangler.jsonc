@@ -176,8 +176,9 @@
       "triggers": {
         "crons": ["* * * * *"]
       },
-      // Hosted servers stay off until these are set with `wrangler secret put <name> --env test`:
-      // BOAT_API_KEY, BOAT_WEBHOOK_SECRET, HOSTED_SERVER_TEMPLATE and HOSTED_SERVERS_ALLOWED_USER_IDS.
+      // Hosted servers stay off until these are set. `api:deploy:test` sets BOAT_API_KEY and
+      // BOAT_WEBHOOK_SECRET from `.env.shared`. Set HOSTED_SERVER_TEMPLATE and
+      // HOSTED_SERVERS_ALLOWED_USER_IDS with `wrangler secret put <name> --env test`.
       // They are not required, so the test Worker deploys without them. See docs/hosted-servers.md.
       "secrets": {
         "required": [
