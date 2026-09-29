@@ -45,10 +45,14 @@ export class ChannelMemoryStore extends MemoryStore {
     return { ...memory, channelId };
   }
 
-  /** `channel_forget_memory` names the text, not an id: the model never sees a memory id. */
+  /**
+   * `channel_forget_memory` names the text, not an id: the model never sees a memory id. It also
+   * names the text as it read it, so the case can differ from the stored text: a case-insensitive
+   * match is what makes the delete find the memory the user asked to remove.
+   */
   deleteByText(channelId: string, text: string): boolean {
-    const target = text.trim();
-    const memory = this.list(channelId).find((entry) => entry.text === target);
+    const target = text.trim().toLocaleLowerCase();
+    const memory = this.list(channelId).find((entry) => entry.text.trim().toLocaleLowerCase() === target);
     return memory ? this.delete(channelId, memory.id) : false;
   }
 }

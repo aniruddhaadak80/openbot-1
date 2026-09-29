@@ -1444,8 +1444,9 @@ describe("shared channel coordination", () => {
     const memories = service.memories.list("channel-1");
     expect(memories).toHaveLength(1);
     expect(memories[0]).toMatchObject({ text: "The client signs off on Fridays.", origin: "automatic" });
+    // The model names the text from what it read, so its case can differ from the stored text.
     await service.tool("channel-1", "agent-a", "memory-turn", "call-2", "channel_forget_memory", {
-      text: "The client signs off on Fridays.",
+      text: "the client signs off on fridays.",
     });
     expect(service.memories.list("channel-1")).toHaveLength(0);
   });
