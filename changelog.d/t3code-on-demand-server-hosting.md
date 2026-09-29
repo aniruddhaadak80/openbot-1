@@ -19,3 +19,8 @@
 - The account service sends product analytics events when a plan or a hosted server changes. The
   events have your account ID and fixed values only, with no email, name or server ID. See
   PRIVACY.md.
+
+### Fixed
+
+- Remote control connects at once to a computer or server that restarted with no clean
+  disconnect. Before, it could wait for up to four minutes.
