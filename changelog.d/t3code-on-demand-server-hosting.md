@@ -12,7 +12,7 @@
 - The plan of a server sets its member limit: Starter 3, Standard 10 and Pro 25 active members,
   owner included. A server with no plan keeps 3. When a plan goes down or ends, no member is
   removed, but no new member can join until there is a free seat.
-- A hosted server stops after 15 minutes with no use and keeps its data. It starts again when you
+- A hosted server stops 15 to 20 minutes after its last use and keeps its data. It starts again when you
   connect to it.
 
 ### Changed

@@ -109,6 +109,7 @@ async function setup() {
     HOSTED_SERVER_TEMPLATE: "openbot-server-test",
     BOAT_API_KEY: "boat-key",
     BOAT_WEBHOOK_SECRET: BOAT_WEBHOOK_SECRET,
+    HOSTED_CLAIM_SECRET: "hosted-claim-test-secret",
   };
   const stripe = new FakeStripe();
   const events: { accountId: string; event: AccountAnalyticsEvent }[] = [];
@@ -568,6 +569,19 @@ describe("hosted servers", () => {
     await context.service.wake(owner, server.serverId);
     await expect(context.service.redeemClaim(claim)).rejects.toMatchObject({ code: "hosted_claim_invalid" });
 
+    // The owner revoked the session of the server. Its next start makes the claim work again.
+    context.database
+      .prepare(
+        "UPDATE auth_sessions SET revoked_at = 1 WHERE id = (SELECT auth_session_id FROM hosted_servers WHERE server_id = ?)",
+      )
+      .run(server.serverId);
+    await context.service.handleWebhook(context.boatWebhook("sandbox.ready", "ready"));
+    context.clock.now += 16 * MINUTE;
+    await expect(context.service.tick()).resolves.toMatchObject({ idle: 1 });
+    await context.service.handleWebhook(context.boatWebhook("sandbox.archived", "archived"));
+    await context.service.wake(owner, server.serverId);
+    await expect(context.service.redeemClaim(claim)).resolves.toMatchObject({ hostId: server.serverId });
+
     // The cron gave up on a create that boat answers later. The row keeps that sandbox.
     const late = await context.service.create(owner, STARTER, "create-key-0000002", RETURN);
     context.refusals.beforeAnswer = () => {
@@ -581,6 +595,17 @@ describe("hosted servers", () => {
     expect(sandboxOf(late.server.serverId)).toEqual({ provider_sandbox_id: "bx_2" });
     expect(context.state(late.server.serverId)).toMatchObject({ observed_state: "starting", observed_error: null });
     expect(context.boatCalls.filter((call) => call.method === "DELETE")).toHaveLength(0);
+
+    // A delete before the setup retry finds the sandbox of a lost create, and deletes it.
+    context.refusals.beforeAnswer = () => {};
+    context.refusals.lostAnswers = 2;
+    const lost = await context.service.create(owner, STARTER, "create-key-0000003", RETURN);
+    await context.stripeSync("sub_3", "active", lost.server.serverId);
+    expect(context.state(lost.server.serverId)).toMatchObject({ observed_state: "error" });
+    await context.service.delete(owner, lost.server.serverId, lost.server.name);
+    expect(context.boatCalls.filter((call) => call.method === "DELETE").map((call) => call.path)).toEqual([
+      "/sandboxes/bx_3",
+    ]);
   });
 
   it("moves a server to the machine of its new plan, and keeps its machine when the data does not fit", async () => {

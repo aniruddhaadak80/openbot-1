@@ -275,6 +275,16 @@ export function SettingsModal(props: SettingsModalProps) {
   const isMac = () => props.appInfo?.platform === "darwin";
   // An account that lost access to hosting still sees its servers, so it can delete or start them.
   const hostedServersShown = () => hostedServers.state.available || hostedServers.state.servers.length > 0;
+  // A deep link, or the last server's delete, can leave the Hosted servers tab open without its panel.
+  createEffect(
+    () =>
+      activeTab() === "hosted-servers" &&
+      !hostedServersShown() &&
+      (hostedServers.state.loaded || hostedServers.state.error !== null || !props.hostedServersApi),
+    (hidden) => {
+      if (hidden) setActiveTab("general");
+    },
+  );
   const visibleNavItems = () =>
     navItems.filter(
       (item) =>

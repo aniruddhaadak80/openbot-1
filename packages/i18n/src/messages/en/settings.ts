@@ -257,15 +257,14 @@ export const messages = defineMessages("settings", {
   "settings.hostedServers.state.waking": "Starting again",
   "settings.hostedServers.state.error": "Error",
   "settings.hostedServers.state.deleted": "Deleted",
-  // {time} is a date and time, such as "Sep 28, 2026, 9:00 AM".
   "settings.hostedServers.errorDescription": "The server could not start. Start it to try again.",
   "settings.hostedServers.paymentDescription": "The setup starts when Stripe confirms the payment.",
   "settings.hostedServers.planEndedDescription":
     "The plan ended, so the server stopped. Its data stays. Renew the plan to start it.",
   "settings.hostedServers.pay": "Open payment page",
-  "settings.hostedServers.payLabel": "Open the payment page for {name}",
+  "settings.hostedServers.payLabel": "Open payment page for {name}",
   "settings.hostedServers.renew": "Renew plan",
-  "settings.hostedServers.renewLabel": "Renew the plan for {name}",
+  "settings.hostedServers.renewLabel": "Renew plan for {name}",
   "settings.hostedServers.openingCheckout": "Opening…",
   "settings.hostedServers.checkoutFailed": "Could not open the payment page.",
   "settings.hostedServers.wake": "Start",

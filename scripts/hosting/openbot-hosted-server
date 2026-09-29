@@ -29,6 +29,12 @@ export OPENBOT_HOSTED_SERVER=1
 
 # Each server makes its own keyring password on its first start, so no two servers share one.
 # The password only lets the daemon open the keyring without a person; the file is 0600.
+# A keyring with no password file is not new: a new password cannot open it, so the service stops
+# and systemd tries again after the home folder is back.
+if [ ! -s "$state/keyring-password" ] && [ -e /srv/openbot-hosted/keyrings/login.keyring ]; then
+  echo "The keyring exists, but its password file is missing." >&2
+  exit 1
+fi
 if [ ! -s "$state/keyring-password" ]; then
   temporary=$(mktemp "$state/keyring-password.XXXXXX")
   head -c 32 /dev/urandom | base64 | tr -d '\n' >"$temporary"
@@ -47,8 +53,11 @@ export XDG_DATA_HOME=/srv/openbot-hosted
 keyrings="$XDG_DATA_HOME/keyrings"
 mkdir -p "$keyrings"
 printf login >"$keyrings/default"
-eval "$(gnome-keyring-daemon --unlock --components=secrets <"$state/keyring-password")"
-eval "$(gnome-keyring-daemon --start --components=secrets)"
+# An assignment first, so `set -e` stops the start when the daemon fails. `eval "$(…)"` ignores it.
+unlocked=$(gnome-keyring-daemon --unlock --components=secrets <"$state/keyring-password")
+eval "$unlocked"
+started=$(gnome-keyring-daemon --start --components=secrets)
+eval "$started"
 unset XDG_DATA_HOME
 export GNOME_KEYRING_CONTROL
 

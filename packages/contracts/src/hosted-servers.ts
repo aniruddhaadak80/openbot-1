@@ -144,14 +144,16 @@ export function parseHostedServerSummary(value: unknown): HostedServerSummary | 
   };
 }
 
-/** Returns null for a value that is not a hosted server list. */
+/**
+ * Returns null for a value that is not a hosted server list. A server that this app cannot read, for
+ * example with a plan that a newer Worker added, is left out, so the others still show.
+ */
 export function parseHostedServerList(value: unknown): HostedServerList | null {
   if (!isDynamicRecord(value) || !isBoolean(value.available) || !Array.isArray(value.servers)) return null;
   const servers: HostedServerSummary[] = [];
   for (const entry of value.servers) {
     const server = parseHostedServerSummary(entry);
-    if (!server) return null;
-    servers.push(server);
+    if (server) servers.push(server);
   }
   return { available: value.available, servers };
 }
@@ -260,7 +262,7 @@ function parsePlanPrices(value: unknown): HostedServerCatalogPlan["prices"] | nu
   return eur && usd && pln ? { eur, usd, pln } : null;
 }
 
-/** Returns null for a value that is not a plan catalog. */
+/** Returns null for a value that is not a plan catalog. A plan that this app cannot read is left out. */
 export function parseHostedServerCatalog(value: unknown): HostedServerCatalog | null {
   if (!isDynamicRecord(value) || !Array.isArray(value.plans)) return null;
   const plans: HostedServerCatalogPlan[] = [];
@@ -272,10 +274,10 @@ export function parseHostedServerCatalog(value: unknown): HostedServerCatalog | 
       !isNumber(entry.memberLimit) ||
       !isNumber(entry.relativeSpeed)
     ) {
-      return null;
+      continue;
     }
     const prices = parsePlanPrices(entry.prices);
-    if (!prices) return null;
+    if (!prices) continue;
     plans.push({
       id: entry.id,
       diskGb: entry.diskGb,
@@ -290,6 +292,7 @@ export function parseHostedServerCatalog(value: unknown): HostedServerCatalog | 
 /** Returns null for a value that is not a valid delete request. */
 export function parseDeleteHostedServerInput(value: unknown): DeleteHostedServerInput | null {
   if (!isDynamicRecord(value) || !isString(value.serverId) || !isString(value.confirmName)) return null;
-  if (!value.serverId || value.confirmName.length > INPUT_LIMITS.serverName) return null;
+  if (!value.serverId || value.serverId.length > INPUT_LIMITS.identifier) return null;
+  if (value.confirmName.length > INPUT_LIMITS.serverName) return null;
   return { serverId: value.serverId, confirmName: value.confirmName };
 }

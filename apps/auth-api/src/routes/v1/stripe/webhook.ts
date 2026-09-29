@@ -18,7 +18,7 @@ export const Route = createFileRoute("/v1/stripe/webhook")({
           await billing.handleWebhook(payload, request.headers.get("Stripe-Signature"));
           return json({ received: true });
         } catch (error) {
-          // Stripe sends the event again after a 5xx answer; a 4xx answer ends the retries.
+          // Stripe sends the event again after each answer that is not 2xx, for up to 3 days.
           if (error instanceof BillingError || error instanceof JsonBodyError) return billingErrorResponse(error);
           console.error("billing: webhook failed", error instanceof Error ? error.name : "unknown");
           return apiError(500, "internal_error", "The webhook could not be applied.");

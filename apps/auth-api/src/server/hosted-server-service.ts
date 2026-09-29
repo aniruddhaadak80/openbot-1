@@ -48,7 +48,7 @@ const DELIVERY_RETENTION_MS = 7 * 24 * 60 * 60_000;
 const MAX_SERVERS_PER_ACCOUNT = 3;
 const TICK_BATCH_SIZE = 20;
 /**
- * A server that waits for its first payment this long is removed. Its Checkout page (30 minutes)
+ * A server that waits for its first payment this long is removed. Its Checkout page (35 minutes)
  * closed long before, and it has no sandbox, so no data is lost.
  */
 const UNPAID_RETENTION_MS = 24 * 60 * 60_000;
@@ -72,6 +72,12 @@ const IDLE_STOP_AFTER_MS = 15 * 60_000;
  */
 const LEASE_TTL_SECONDS = 2 * 60 * 60;
 const LEASE_EXTEND_BEFORE_MS = 60 * 60_000;
+/**
+ * The VM of the row has no session that works: it never signed in, or the owner revoked its session.
+ * Only then does the claim work again.
+ */
+const CLAIM_OPEN_SQL = `(hosted_servers.auth_session_id IS NULL OR NOT EXISTS(
+  SELECT 1 FROM auth_sessions WHERE auth_sessions.id = hosted_servers.auth_session_id AND auth_sessions.revoked_at IS NULL))`;
 /** The same list as `isOpenBillingStatus`: a subscription that Stripe can still charge. */
 const OPEN_STATUSES_SQL = "('active', 'trialing', 'past_due', 'unpaid', 'paused')";
 
@@ -83,6 +89,7 @@ export type HostedServerBindings = Pick<
   | "HOSTED_SERVER_TEMPLATE"
   | "BOAT_API_KEY"
   | "BOAT_WEBHOOK_SECRET"
+  | "HOSTED_CLAIM_SECRET"
 >;
 
 export class HostedServerServiceError extends Error {
@@ -108,6 +115,7 @@ interface HostedServerRow {
   owner_user_id: string;
   name: string;
   provider_sandbox_id: string | null;
+  provider_template: string | null;
   size: HostedServerSize;
   pending_size: HostedServerSize | null;
   plan: BillingPlanId;
@@ -125,14 +133,14 @@ interface HostedServerRow {
   updated_at: number;
 }
 
-const ROW_COLUMNS = `server_id, owner_user_id, name, provider_sandbox_id, size, pending_size, plan, billing_interval, currency,
+const ROW_COLUMNS = `server_id, owner_user_id, name, provider_sandbox_id, provider_template, size, pending_size, plan, billing_interval, currency,
   checkout_session_id, desired_state, observed_state, observed_error, provider_event_at, auth_session_id,
   last_active_at, lease_until, created_at, updated_at`;
 
 /** The billing calls that hosted servers use. */
 export type HostedServerBilling = Pick<
   BillingService,
-  "catalog" | "createCheckout" | "closeCheckout" | "cancelServerPlans" | "cancelSubscription"
+  "catalog" | "createCheckout" | "closeCheckout" | "cancelServerPlans" | "cancelSubscription" | "refreshLapsedPlans"
 >;
 
 export interface HostedServerServiceOptions {
@@ -168,6 +176,7 @@ export class HostedServerService {
   readonly #boat: BoatClient | null;
   readonly #template: string | null;
   readonly #webhookSecret: string | null;
+  readonly #claimSecret: string | null;
   readonly #enabled: boolean;
   readonly #allowedUserIds: ReadonlySet<string>;
   readonly #now: () => number;
@@ -181,7 +190,12 @@ export class HostedServerService {
     this.#boat = apiKey ? new BoatClient({ apiKey, fetch: options.fetch }) : null;
     this.#template = bindings.HOSTED_SERVER_TEMPLATE?.trim() || null;
     this.#webhookSecret = bindings.BOAT_WEBHOOK_SECRET?.trim() || null;
-    this.#enabled = bindings.HOSTED_SERVERS_ENABLED === "true" && this.#boat !== null && this.#template !== null;
+    this.#claimSecret = bindings.HOSTED_CLAIM_SECRET?.trim() || null;
+    this.#enabled =
+      bindings.HOSTED_SERVERS_ENABLED === "true" &&
+      this.#boat !== null &&
+      this.#template !== null &&
+      this.#claimSecret !== null;
     this.#allowedUserIds = new Set(
       (bindings.HOSTED_SERVERS_ALLOWED_USER_IDS ?? "")
         .split(",")
@@ -523,6 +537,7 @@ export class HostedServerService {
       return done;
     };
     if (this.#billing) {
+      await this.#billing.refreshLapsedPlans(now);
       // The Stripe webhook applies a plan at once. This catches a webhook that failed. Without billing,
       // no plan is checked, so a deployment that loses its Stripe key does not stop each server.
       const planChanged = await this.#database
@@ -694,8 +709,8 @@ export class HostedServerService {
     await this.#database
       .prepare(
         `UPDATE hosted_servers SET plan = ?, billing_interval = ?, currency = ?,
-           size = CASE WHEN provider_sandbox_id IS NULL THEN ? ELSE size END,
-           pending_size = CASE WHEN provider_sandbox_id IS NULL OR size = ? THEN NULL ELSE ? END, updated_at = ?
+           size = CASE WHEN provider_template IS NULL THEN ? ELSE size END,
+           pending_size = CASE WHEN provider_template IS NULL OR size = ? THEN NULL ELSE ? END, updated_at = ?
          WHERE server_id = ? AND desired_state != 'deleted'`,
       )
       .bind(sync.plan, sync.interval, sync.currency, size, size, size, this.#now(), row.server_id)
@@ -757,32 +772,31 @@ export class HostedServerService {
   async #provision(row: HostedServerRow): Promise<void> {
     const boat = this.#boat;
     const template = this.#template;
-    const secret = this.#webhookSecret;
+    const secret = this.#claimSecret;
     // Thrown before the row changes, so the webhook retry or the cron provisions it later.
     if (!boat || !template || !secret) {
       throw new HostedServerServiceError(503, "hosting_not_configured", "Hosted servers are not configured.");
     }
     // The claim works from now, so its lifetime counts from the start of the sandbox, not from the payment page.
+    // A VM that signed in during a lost attempt keeps its session, and the claim stays spent.
     const claim = await hostedClaim(secret, row.server_id);
+    // A retry sends the request of the first attempt, also after a deploy that changed the template.
+    const from = row.provider_template ?? template;
     const now = this.#now();
     const claimed = await this.#database
       .prepare(
-        `UPDATE hosted_servers SET observed_state = 'creating', last_wake_reason = 'create', claim_token_hash = ?,
-           claim_expires_at = ?, claim_redeemed_at = NULL, checkout_session_id = NULL, provider_event_at = ?, last_active_at = ?,
-           lease_until = ?, updated_at = ?
+        `UPDATE hosted_servers SET observed_state = 'creating', last_wake_reason = 'create',
+           claim_token_hash = CASE WHEN ${CLAIM_OPEN_SQL} THEN ? ELSE claim_token_hash END,
+           claim_expires_at = CASE WHEN ${CLAIM_OPEN_SQL} THEN ? ELSE claim_expires_at END,
+           claim_redeemed_at = CASE WHEN ${CLAIM_OPEN_SQL} THEN NULL ELSE claim_redeemed_at END,
+           provider_template = COALESCE(provider_template, ?), checkout_session_id = NULL, provider_event_at = ?,
+           last_active_at = ?, lease_until = ?, updated_at = ?
          WHERE server_id = ? AND observed_state = 'awaiting_payment' AND desired_state = 'running'`,
       )
-      .bind(await sha256(claim), now + CLAIM_TTL_MS, now, now, now + LEASE_TTL_SECONDS * 1000, now, row.server_id)
+      .bind(await sha256(claim), now + CLAIM_TTL_MS, from, now, now, now + LEASE_TTL_SECONDS * 1000, now, row.server_id)
       .run();
     if (claimed.meta.changes !== 1) return;
-    const request = {
-      type: row.size,
-      from: template,
-      // The claim is the only secret that the VM gets. It works for a short time after its first use, and expires.
-      env: { OPENBOT_HOSTED_CLAIM: claim, OPENBOT_HOSTED_HOST_ID: row.server_id },
-      ttlSeconds: LEASE_TTL_SECONDS,
-      idempotencyKey: row.server_id,
-    };
+    const request = createRequest(row, from, claim);
     try {
       // The same idempotency key and request body make a retry safe: boat returns the sandbox that it made.
       const sandbox = await boat.createSandbox(request).catch((error: unknown) => {
@@ -797,7 +811,7 @@ export class HostedServerService {
         .bind(sandbox.id, isUsable(sandbox.state) ? "running" : "starting", this.#now(), row.server_id)
         .run();
       if (stored.meta.changes !== 1 && !(await this.#adopt(row, sandbox, claim))) {
-        // The server was deleted during the create. The sandbox costs money until it is deleted.
+        // The server was deleted after the cron gave up on this create. The sandbox costs money until it is deleted.
         console.warn("Hosted server sandbox has no row.", { serverId: row.server_id });
         await boat.deleteSandbox(sandbox.id).catch((error: unknown) => {
           console.warn("Hosted server sandbox delete failed.", {
@@ -825,7 +839,8 @@ export class HostedServerService {
   }
 
   /**
-   * Stores a sandbox whose create the cron gave up on. A delete during the create does not keep it.
+   * Stores a sandbox whose create the cron gave up on. Only a Worker that stops during the call leaves a
+   * create for the cron, so this is a guard for that case. A server deleted since then does not keep it.
    * The claim works again, so the VM can sign in, and the VM restarts until it does.
    */
   async #adopt(row: HostedServerRow, sandbox: { id: string; state: BoatSandboxState }, claim: string) {
@@ -834,8 +849,8 @@ export class HostedServerService {
       .prepare(
         `UPDATE hosted_servers SET provider_sandbox_id = ?, observed_state = ?,
            observed_error = CASE WHEN observed_error = 'plan_ended' THEN observed_error ELSE NULL END,
-           claim_token_hash = CASE WHEN auth_session_id IS NULL THEN ? ELSE claim_token_hash END,
-           claim_expires_at = CASE WHEN auth_session_id IS NULL THEN ? ELSE claim_expires_at END, updated_at = ?
+           claim_token_hash = CASE WHEN ${CLAIM_OPEN_SQL} THEN ? ELSE claim_token_hash END,
+           claim_expires_at = CASE WHEN ${CLAIM_OPEN_SQL} THEN ? ELSE claim_expires_at END, updated_at = ?
          WHERE server_id = ? AND observed_state = 'error' AND provider_sandbox_id IS NULL AND desired_state != 'deleted'`,
       )
       .bind(
@@ -1066,7 +1081,7 @@ export class HostedServerService {
     try {
       return (await this.#billing?.closeCheckout(sessionId)) ?? null;
     } catch (error) {
-      // The page closes by itself after 30 minutes.
+      // The page closes by itself after 35 minutes.
       console.warn("Checkout close failed.", { error: safeErrorCode(error) });
       return null;
     }
@@ -1085,14 +1100,15 @@ export class HostedServerService {
     const now = this.#now();
     // A stopping server starts again when the provider reports that it stopped.
     if (row.observed_state !== "stopped" && !(row.observed_state === "error" && row.provider_sandbox_id)) return;
-    // A VM that never signed in has its claim in its env file. The claim works again for this start.
-    const claimHash = this.#webhookSecret ? await sha256(await hostedClaim(this.#webhookSecret, row.server_id)) : null;
+    // A VM that never signed in, or whose session the owner revoked, has its claim in its env file. The
+    // claim works again for this start.
+    const claimHash = this.#claimSecret ? await sha256(await hostedClaim(this.#claimSecret, row.server_id)) : null;
     const waking = await this.#database
       .prepare(
         `UPDATE hosted_servers SET observed_state = 'waking', observed_error = NULL,
            last_wake_reason = ?, provider_event_at = ?, last_active_at = ?, lease_until = ?,
-           claim_token_hash = CASE WHEN auth_session_id IS NULL THEN ? ELSE claim_token_hash END,
-           claim_expires_at = CASE WHEN auth_session_id IS NULL THEN ? ELSE claim_expires_at END,
+           claim_token_hash = CASE WHEN ${CLAIM_OPEN_SQL} THEN ? ELSE claim_token_hash END,
+           claim_expires_at = CASE WHEN ${CLAIM_OPEN_SQL} THEN ? ELSE claim_expires_at END,
            updated_at = ?
          WHERE server_id = ? AND observed_state = ? AND desired_state = 'running'`,
       )
@@ -1198,10 +1214,11 @@ export class HostedServerService {
   async #finishDelete(row: HostedServerRow): Promise<void> {
     // A create call runs and can still return a sandbox. The cron deletes it after the call ends.
     if (row.observed_state === "creating" && !row.provider_sandbox_id) return;
-    if (row.provider_sandbox_id) {
+    const sandboxId = row.provider_sandbox_id ?? (await this.#findLostSandbox(row));
+    if (sandboxId) {
       if (!this.#boat) throw new HostedServerServiceError(503, "hosting_not_configured", "Hosting is not configured.");
       try {
-        await this.#boat.deleteSandbox(row.provider_sandbox_id);
+        await this.#boat.deleteSandbox(sandboxId);
       } catch (error) {
         throw new HostedServerServiceError(
           502,
@@ -1225,6 +1242,26 @@ export class HostedServerService {
         .prepare("UPDATE auth_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL")
         .bind(now, row.auth_session_id),
     ]);
+  }
+
+  /**
+   * A create whose answer was lost can have made a sandbox that the row does not name. The same request
+   * returns that sandbox, so the delete removes it too. The deleted row refuses the claim of the VM.
+   */
+  async #findLostSandbox(row: HostedServerRow): Promise<string | null> {
+    const boat = this.#boat;
+    const secret = this.#claimSecret;
+    if (!boat || !secret || !row.provider_template) return null;
+    try {
+      const request = createRequest(row, row.provider_template, await hostedClaim(secret, row.server_id));
+      return (await boat.createSandbox(request)).id;
+    } catch (error) {
+      console.warn("Hosted server lost sandbox lookup failed.", {
+        serverId: row.server_id,
+        error: safeErrorCode(error),
+      });
+      return null;
+    }
   }
 
   #track(row: HostedServerRow, event: AccountAnalyticsEvent): void {
@@ -1273,6 +1310,18 @@ function summary(row: HostedServerRow): HostedServerSummary {
  * boat returns the sandbox that it made. The Worker stores only its hash, and accepts it only while
  * the row says so: from a create or a start of a VM that never signed in, until it expires.
  */
+/** The create request of a server. Each attempt sends the same one, so boat can return a sandbox that it made. */
+function createRequest(row: HostedServerRow, from: string, claim: string) {
+  return {
+    type: row.size,
+    from,
+    // The claim is the only secret that the VM gets. It works for a short time after its first use, and expires.
+    env: { OPENBOT_HOSTED_CLAIM: claim, OPENBOT_HOSTED_HOST_ID: row.server_id },
+    ttlSeconds: LEASE_TTL_SECONDS,
+    idempotencyKey: row.server_id,
+  };
+}
+
 async function hostedClaim(secret: string, serverId: string): Promise<string> {
   return hmacSha256(secret, `openbot-hosted-claim:v1:${serverId}`);
 }

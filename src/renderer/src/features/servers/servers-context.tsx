@@ -200,19 +200,31 @@ const Servers = createSimpleContext({
         .then(setHostStatus)
         .catch(() => undefined);
       void refreshHostedServersAvailable();
+      // Another account can sign in after the start, so the plus button reads its access again.
+      let signedInUserId: string | null = null;
+      const unsubscribeAuth = serversPort().auth.onEvent((state) => {
+        if (state.status !== "signed_in" && state.status !== "signed_out") return;
+        const userId = state.status === "signed_in" ? state.user.id : null;
+        if (userId === signedInUserId) return;
+        signedInUserId = userId;
+        if (userId) void refreshHostedServersAvailable();
+        else setHostedServersAvailable(false);
+      });
       return () => {
         unsubscribeServers();
         unsubscribeHost();
+        unsubscribeAuth();
       };
     });
 
     /** Reads again whether the account can create hosted servers. The account can change after the start. */
     async function refreshHostedServersAvailable(): Promise<boolean> {
+      // A failed read keeps the last answer: a network error does not turn the plans off.
       const available = await serversPort()
         .hostedServers.list()
         .then(
           (list) => list.available,
-          () => false,
+          () => hostedServersAvailable(),
         );
       setHostedServersAvailable(available);
       return available;

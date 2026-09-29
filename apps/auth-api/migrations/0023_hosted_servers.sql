@@ -6,6 +6,9 @@ CREATE TABLE hosted_servers (
   name TEXT NOT NULL,
   provider TEXT NOT NULL DEFAULT 'boat' CHECK(provider IN ('boat')),
   provider_sandbox_id TEXT UNIQUE,
+  -- The template of the first create. A retry sends the same request, so boat returns the sandbox of a
+  -- create whose answer was lost.
+  provider_template TEXT,
   -- The machine of the sandbox.
   size TEXT NOT NULL CHECK(size IN ('small', 'default', 'large')),
   -- The machine of a new plan, until boat resumes the sandbox on it. boat changes the size only on a resume.

@@ -5,9 +5,11 @@ when the user's computer is off. Each server is one boat sandbox for one account
 the Linux build of OpenBot under Xvfb. The server runs while it is in use. After 15 minutes with no
 use, the Worker stops it and keeps its data, and the next client starts it again.
 
-The Worker enables hosted servers only when it has the boat and Stripe secrets, and only for the
-account IDs in `HOSTED_SERVERS_ALLOWED_USER_IDS` (`*` allows each account). See
-[Production](#production). Each server has its own Stripe plan. Its machine comes from the plan
+The Worker enables hosted servers only when it has the boat, claim and Stripe secrets and
+`HOSTED_SERVER_TEMPLATE`, and only for the account IDs in `HOSTED_SERVERS_ALLOWED_USER_IDS` (`*`
+allows each account). See [Production](#production). An account can have 3 servers that are not
+deleted (`MAX_SERVERS_PER_ACCOUNT`); a server that waits for its first payment counts. Each server
+has its own Stripe plan. Its machine comes from the plan
 (`HOSTED_PLAN_SIZE`): Starter is boat `small`, Standard is `default`, and Pro is `large`.
 
 ## Parts
@@ -32,7 +34,7 @@ when a server is idle or boat stops a sandbox; and `error` and `deleted`. The Wo
    servers; otherwise it opens the join dialog. A plan sends `POST /v2/hosting/servers/` with
    `{name, plan, interval, currency}` and an `Idempotency-Key`. The Worker stores a row in
    `awaiting_payment` with no claim and no sandbox, makes the Stripe customer, and returns a Stripe
-   Checkout URL (30 minutes). A repeated request expires the old Checkout and returns a new one.
+   Checkout URL (35 minutes). A repeated request expires the old Checkout and returns a new one.
    The desktop main process opens the URL only when it is an `https://checkout.stripe.com` URL; the
    renderer never gets it. The web client goes to the page in the same tab, and Stripe returns to
    `/app?hosting=checkout&hosted_server=<id>` (`&cancelled=1` when the user went back).
@@ -86,7 +88,7 @@ when a server is idle or boat stops a sandbox; and `error` and `deleted`. The Wo
    A paid server whose setup failed has no sandbox. A wake (Retry in the add server dialog) sets
    it up again at once, and the cron does this 10 minutes after each failure. Each attempt sends
    the same request body and the same idempotency key, the host ID. The claim is an HMAC of the
-   host ID with `BOAT_WEBHOOK_SECRET`, so it is the same on each attempt. When a failed attempt made
+   host ID with `HOSTED_CLAIM_SECRET`, which only the Worker holds, so it is the same on each attempt. When a failed attempt made
    a sandbox, boat returns that sandbox and the Worker stores it. A sandbox that a create returns
    after the cron gave up on that create is stored too; only a delete during the create removes it.
 7. **Plan ends.** When the subscription is cancelled or unpaid, or `past_due` after its period
@@ -136,9 +138,9 @@ with `getServerEntitlement` when a member joins or is reactivated, and refuses a
 ## Configure the test Worker
 
 `HOSTED_SERVERS_ENABLED` is `true` in `env.test` of `apps/auth-api/wrangler.jsonc`.
-`bun run api:deploy:test` sets `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `BOAT_API_KEY` and
-`BOAT_WEBHOOK_SECRET` from the encrypted `apps/auth-api/.env.shared` on each deploy, so a value that
-you set by hand for these four is replaced. Set the rest with `wrangler secret put <name> --env test`
+`bun run api:deploy:test` sets `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `BOAT_API_KEY`,
+`BOAT_WEBHOOK_SECRET` and `HOSTED_CLAIM_SECRET` from the encrypted `apps/auth-api/.env.shared` on each
+deploy, so a value that you set by hand for these five is replaced. Set the rest with `wrangler secret put <name> --env test`
 from `apps/auth-api`:
 
 | Name | Value |
@@ -182,18 +184,21 @@ servers, their webhooks and the cron continue.
 5. **OpenPanel.** In the production project, make a server client. Its ID and secret send the
    billing and server events in [ANALYTICS.md](../ANALYTICS.md). Only production gets them.
 6. **Secrets.** The `Deploy Cloudflare production` job in `.github/workflows/ci.yml` sends these
-   from the `cloudflare-production` GitHub Environment. It refuses a pair with one value and a
-   Stripe key that is not live. A value that is not set keeps the value that the Worker has.
+   from the `cloudflare-production` GitHub Environment. It refuses a set with only some values and a
+   Stripe key that is not live. A value that is not set keeps the value that the Worker has; to turn
+   a feature off, run `wrangler secret delete <name>`.
 
    | Name | Kind | Value |
    | --- | --- | --- |
    | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | secrets, a pair | The live key and the secret from step 4 |
-   | `BOAT_API_KEY`, `BOAT_WEBHOOK_SECRET` | secrets, a pair | The key from step 1 and the secret from step 3 |
+   | `BOAT_API_KEY`, `BOAT_WEBHOOK_SECRET`, `HOSTED_CLAIM_SECRET` | secrets, a set | The key from step 1, the secret from step 3, and a new random value (`openssl rand -hex 32`) that only the Worker has |
    | `OPENPANEL_CLIENT_ID`, `OPENPANEL_CLIENT_SECRET` | secrets, a pair | The client from step 5 |
    | `HOSTED_SERVER_TEMPLATE` | variable | The snapshot name from step 2 |
-   | `HOSTED_SERVERS_ALLOWED_USER_IDS` | variable | Account IDs, or `*` for each account |
+   | `HOSTED_SERVERS_ALLOWED_USER_IDS` | secret | Account IDs, or `*` for each account. A secret, so the IDs do not show in the public job log |
 
-   `bun run api:deploy` sends the same names from `.env.production` and checks them the same way.
+   The CI deploy is the production path: `.env.production` does not have all the values that it
+   needs, such as `SITE_REPORT_HASH_SECRET`. `bun run api:deploy` sends the same names from
+   `.env.production` and checks them the same way.
 7. **Check.** After the deploy, sign in with an allowed account, add a Starter server, pay, and
    connect from the desktop and the web client. Delete the server at the end.
 
@@ -245,8 +250,9 @@ signed out after its next start.
 A VM that never signed in keeps its claim in its env file. Each start of that server makes the claim
 work again for one hour, so a VM that missed the first hour, or whose plan ended before it signed in,
 signs in at its next start. After the 10 minutes that follow the first redeem, the Worker never
-accepts the claim again. A new `BOAT_WEBHOOK_SECRET` changes each claim, so a VM that did not sign
-in before the change cannot sign in; delete that server.
+accepts the claim again, until the owner revokes the session of the server: then its next start makes
+the claim work again, and the server signs in with a new session. A new `HOSTED_CLAIM_SECRET` changes
+each claim, so a VM that has no working session cannot sign in after the change; delete that server.
 
 A start that cannot reach the account server does not use the claim. The start retry signs in
 again with backoff (30 s to 10 min) and then publishes the host.

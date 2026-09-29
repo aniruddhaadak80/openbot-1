@@ -156,7 +156,10 @@ function parseBillingServerPlan(value: unknown): BillingServerPlan | null {
   };
 }
 
-/** Returns null for a value that is not a billing state in the account server shape. */
+/**
+ * Returns null for a value that is not a billing state in the account server shape. A plan that this
+ * app cannot read, for example one that a newer Worker added, is left out.
+ */
 export function parseBillingState(value: unknown): BillingState | null {
   if (
     !isDynamicRecord(value) ||
@@ -169,8 +172,7 @@ export function parseBillingState(value: unknown): BillingState | null {
   const servers: BillingServerPlan[] = [];
   for (const item of value.servers) {
     const server = parseBillingServerPlan(item);
-    if (!server) return null;
-    servers.push(server);
+    if (server) servers.push(server);
   }
   return { available: value.available, hasCustomer: value.hasCustomer, servers };
 }

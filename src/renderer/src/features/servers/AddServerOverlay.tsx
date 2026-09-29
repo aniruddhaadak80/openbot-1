@@ -103,7 +103,12 @@ function AddServerSession(
   async function load(): Promise<void> {
     try {
       const [catalog, list] = await Promise.all([props.calls.plans(), props.calls.list()]);
-      const resumed = resume ? list.servers.find((server) => server.serverId === resume.serverId) : undefined;
+      const resumed = resume
+        ? list.servers.find((server) => server.serverId === resume.serverId)
+        : newestInSetup(
+            list.servers,
+            untrack(() => props.servers),
+          );
       for (const [choice, key] of requestIds) {
         const unpaid = list.servers.some(
           (server) => server.serverId === key.serverId && server.state === "awaiting_payment",
@@ -252,4 +257,21 @@ function AddServerSession(
       )}
     </Show>
   );
+}
+
+/**
+ * A paid server that is not on the rail yet, so a new opening of the dialog shows its setup and not
+ * the plans again. A server on the rail that wakes is not a new server.
+ */
+function newestInSetup(
+  servers: readonly HostedServerSummary[],
+  rail: readonly ServerSummary[],
+): HostedServerSummary | undefined {
+  let newest: HostedServerSummary | undefined;
+  for (const server of servers) {
+    if (server.state !== "creating" && server.state !== "starting" && server.state !== "waking") continue;
+    if (rail.some((entry) => entry.id === server.serverId)) continue;
+    if (!newest || server.createdAt > newest.createdAt) newest = server;
+  }
+  return newest;
 }

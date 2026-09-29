@@ -23,13 +23,13 @@ async function main(): Promise<void> {
   await putRequiredSecret("REMOTE_TICKET_PUBLIC_JWKS");
   await putRequiredSecret("REMOTE_AUTH_WEBHOOK_SECRET");
   assertStripeKeyMode();
-  await putOptionalSecretPair("STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET");
-  await putOptionalSecretPair("BOAT_API_KEY", "BOAT_WEBHOOK_SECRET");
+  await putOptionalSecretSet("STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET");
+  await putOptionalSecretSet("BOAT_API_KEY", "BOAT_WEBHOOK_SECRET", "HOSTED_CLAIM_SECRET");
   // An unset value keeps the value that the Worker has: a new template is set for each release.
   await putOptionalSecret("HOSTED_SERVER_TEMPLATE");
   await putOptionalSecret("HOSTED_SERVERS_ALLOWED_USER_IDS");
   // Only production sends account events, so a test Worker does not add events to the production project.
-  if (!cloudflareEnvironment) await putOptionalSecretPair("OPENPANEL_CLIENT_ID", "OPENPANEL_CLIENT_SECRET");
+  if (!cloudflareEnvironment) await putOptionalSecretSet("OPENPANEL_CLIENT_ID", "OPENPANEL_CLIENT_SECRET");
   await run(wranglerExecutable, ["d1", "migrations", "apply", "DB", "--remote", ...environmentArgs], {
     label: "Remote D1 migrations",
   });
@@ -71,20 +71,19 @@ async function putOptionalSecret(name: string): Promise<void> {
 
 /**
  * Billing, hosting and account events are optional: the Worker turns each off without its secrets.
- * Set both or neither. A Stripe or boat key without its webhook secret takes payments or makes
+ * Set all or none of a set. A Stripe or boat key without its webhook secret takes payments or makes
  * sandboxes that the Worker never sees.
  */
-async function putOptionalSecretPair(first: string, second: string): Promise<void> {
-  const present = [first, second].filter((name) => process.env[name]?.trim());
+async function putOptionalSecretSet(...names: string[]): Promise<void> {
+  const present = names.filter((name) => process.env[name]?.trim());
   if (present.length === 0) {
-    logger.info(`${first} and ${second} are not set. The Worker keeps its current values.`);
+    logger.info(`${names.join(", ")} are not set. The Worker keeps its current values.`);
     return;
   }
-  if (present.length === 1) {
-    throw new Error(`Set both ${first} and ${second} in the decrypted production environment, or neither.`);
+  if (present.length !== names.length) {
+    throw new Error(`Set all of ${names.join(", ")} in the decrypted production environment, or none.`);
   }
-  await putRequiredSecret(first);
-  await putRequiredSecret(second);
+  for (const name of names) await putRequiredSecret(name);
 }
 
 async function run(

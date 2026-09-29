@@ -13,7 +13,9 @@ export interface BillingEntitlement {
  * Only a subscription of the account that owns the server counts, so metadata that names another
  * account's server gives that server nothing. The owner comes from the Remote host, or from the hosted
  * server row, which exists before the server publishes its host.
- * A `past_due` subscription keeps its plan until the paid period ends, while Stripe retries the payment.
+ * A `past_due` subscription keeps its plan while Stripe retries the payment, until the end of the period
+ * that the unpaid invoice is for. Stripe must cancel the subscription or mark it unpaid after the last
+ * retry (docs/hosted-servers.md, Production), or the plan lasts for that whole period.
  */
 export async function getServerEntitlement(
   database: D1Database,

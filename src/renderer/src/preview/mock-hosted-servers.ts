@@ -70,6 +70,8 @@ export function createMockHostedServers(): HostedServersDesktopApi {
       updatedAt: CREATED_AT,
     },
   ];
+  /** The account server's idempotency key: a repeated create request returns the same server. */
+  const requests = new Map<string, string>();
   const update = (serverId: string, change: Partial<HostedServerSummary>): HostedServerSummary => {
     const server = servers.find((entry) => entry.serverId === serverId);
     if (!server) throw new Error("The hosted server does not exist.");
@@ -92,6 +94,8 @@ export function createMockHostedServers(): HostedServersDesktopApi {
     },
     plans: async () => structuredClone(MOCK_HOSTED_SERVER_CATALOG),
     create: async (input) => {
+      const earlier = servers.find((entry) => entry.serverId === requests.get(input.requestId));
+      if (earlier) return structuredClone(earlier);
       const now = new Date().toISOString();
       const server: HostedServerSummary = {
         serverId: crypto.randomUUID(),
@@ -106,6 +110,7 @@ export function createMockHostedServers(): HostedServersDesktopApi {
         updatedAt: now,
       };
       servers = [...servers, server];
+      requests.set(input.requestId, server.serverId);
       return structuredClone(server);
     },
     // The preview has no payment page: a renewal is paid at once, and a new server waits for its step.

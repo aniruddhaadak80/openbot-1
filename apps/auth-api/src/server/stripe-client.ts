@@ -8,8 +8,11 @@ const STRIPE_API_ORIGIN = "https://api.stripe.com";
 const STRIPE_TIMEOUT_MS = 10_000;
 /** Stripe's recommended tolerance for the webhook timestamp. */
 const SIGNATURE_TOLERANCE_SECONDS = 300;
-/** A Checkout page stays open this long. Stripe accepts 30 minutes to 24 hours. */
-const CHECKOUT_LIFETIME_SECONDS = 30 * 60;
+/**
+ * A Checkout page stays open this long. Stripe accepts 30 minutes to 24 hours from its own clock, so this
+ * keeps a margin for clock skew and request time.
+ */
+const CHECKOUT_LIFETIME_SECONDS = 35 * 60;
 
 export type StripeFetch = (input: string, init: RequestInit) => Promise<Response>;
 
@@ -73,6 +76,8 @@ const subscriptionSchema = z.object({
         price: z.object({
           id: z.string(),
           lookup_key: z.string().nullable(),
+          // `stripe-bootstrap.ts` writes the plan here. It stays when a new Price takes the lookup key.
+          metadata: z.record(z.string(), z.string()).default({}),
           currency: z.string(),
           unit_amount: z.number().int().nullable(),
           // Present only when the request expands it.

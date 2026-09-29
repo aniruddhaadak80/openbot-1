@@ -40,6 +40,9 @@ const WEBHOOK_EVENT_RETENTION_MS = 7 * 24 * 60 * 60_000;
 const OPEN_STATUSES_SQL = "('active', 'trialing', 'past_due', 'unpaid', 'paused')";
 /** The Remote host id shape (`requiredIdentifier` in remote-control-plane.ts). Other values are stored as no server. */
 const SERVER_ID_PATTERN = /^[A-Za-z0-9:_-]{1,128}$/u;
+const LAPSED_PLAN_GRACE_MS = 24 * 60 * 60 * 1000;
+const LAPSED_PLAN_READ_INTERVAL_MS = 60 * 60 * 1000;
+const LAPSED_PLAN_BATCH_SIZE = 20;
 /** Prices change only when `stripe-bootstrap.ts` runs, so each isolate reads them once in this time. */
 const CATALOG_TTL_MS = 5 * 60_000;
 const catalogCache = new Map<string, { expiresAt: number; prices: ReadonlyMap<string, StripePrice> }>();
@@ -250,6 +253,27 @@ export class BillingService {
   }
 
   /**
+   * Reads again each open plan whose period ended a day ago. Stripe moves the period end at each renewal,
+   * so such a plan missed a webhook, for example a cancel while the webhook failed for 3 days.
+   * Each plan is read at most once per hour.
+   */
+  async refreshLapsedPlans(now: number): Promise<void> {
+    const rows = await this.#database
+      .prepare(
+        `SELECT stripe_subscription_id FROM billing_subscriptions
+         WHERE status IN ${OPEN_STATUSES_SQL} AND current_period_end < ? AND updated_at < ?
+         ORDER BY updated_at LIMIT ?`,
+      )
+      .bind(now - LAPSED_PLAN_GRACE_MS, now - LAPSED_PLAN_READ_INTERVAL_MS, LAPSED_PLAN_BATCH_SIZE)
+      .all<{ stripe_subscription_id: string }>();
+    for (const row of rows.results) {
+      await this.#syncSubscription(row.stripe_subscription_id).catch(() => {
+        console.warn("billing: lapsed plan sync failed", { subscriptionId: row.stripe_subscription_id });
+      });
+    }
+  }
+
+  /**
    * Cancels each open plan of one server now, with no refund. It stops at the first plan that Stripe
    * did not cancel, so the caller can keep the server.
    */
@@ -429,7 +453,11 @@ export class BillingService {
     const readAt = this.#now();
     const subscription = await this.#stripeCall(() => this.#stripe.getSubscription(subscriptionId));
     const customerId = subscriptionCustomerId(subscription);
-    const key = parseBillingLookupKey(subscription.items.data[0]?.price.lookup_key);
+    const price = subscription.items.data[0]?.price;
+    // A changed amount moves the lookup key to a new Price, and current subscriptions keep the old one.
+    const key =
+      parseBillingLookupKey(price?.lookup_key) ??
+      parseBillingLookupKey(`openbot_${price?.metadata.openbot_plan}_${price?.metadata.openbot_interval}`);
     const currency = subscription.currency.toLowerCase();
     if (!key || !isBillingCurrency(currency) || !isOneOf(BILLING_SUBSCRIPTION_STATUSES, subscription.status)) {
       console.warn("billing: subscription is not an OpenBot plan", { subscriptionId });

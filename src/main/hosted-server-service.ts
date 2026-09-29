@@ -15,6 +15,9 @@ import { sourceText } from "@openbot/i18n/source";
 /** A client asks for a wake at most this often for one host, while the host stays unavailable. */
 const WAKE_INTERVAL_MS = 60_000;
 
+/** A running server that the joined list does not have yet makes the list refresh at most this often. */
+const RUNNING_REFRESH_INTERVAL_MS = 15_000;
+
 export interface HostedServerAuthClient {
   requestAuthorized<T>(path: string, init: RequestInit, decoder: (value: unknown) => T, timeoutMs?: number): Promise<T>;
 }
@@ -26,15 +29,29 @@ export interface HostedServerAuthClient {
  */
 export class HostedServerDesktopService {
   readonly #lastWakeAt = new Map<string, number>();
+  readonly #lastRunningAt = new Map<string, number>();
 
+  /**
+   * `onRunning` gets each running server from a list, so the caller can refresh the joined servers
+   * when a new server is ready and does not wait for the next directory poll.
+   */
   constructor(
     private readonly auth: HostedServerAuthClient,
     private readonly openExternal: (url: string) => Promise<void>,
     private readonly now: () => number = Date.now,
+    private readonly onRunning: (serverId: string) => void = () => {},
   ) {}
 
-  list(): Promise<HostedServerList> {
-    return this.auth.requestAuthorized("/v2/hosting/servers/", { method: "GET" }, decodeList);
+  async list(): Promise<HostedServerList> {
+    const list = await this.auth.requestAuthorized("/v2/hosting/servers/", { method: "GET" }, decodeList);
+    for (const server of list.servers) {
+      if (server.state !== "running") continue;
+      const last = this.#lastRunningAt.get(server.serverId);
+      if (last !== undefined && this.now() - last < RUNNING_REFRESH_INTERVAL_MS) continue;
+      this.#lastRunningAt.set(server.serverId, this.now());
+      this.onRunning(server.serverId);
+    }
+    return list;
   }
 
   plans(): Promise<HostedServerCatalog> {

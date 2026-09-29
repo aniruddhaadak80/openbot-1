@@ -140,9 +140,9 @@ export function decodeRemoteHosts(value: unknown): RemoteHostSummary[] {
     if (host.devicePublicKey !== null && !isString(host.devicePublicKey)) throw new Error("Invalid remote host key.");
     if (host.role !== "owner" && host.role !== "admin" && host.role !== "member")
       throw new Error("Invalid remote host role.");
+    // A bad limit drops only the limit, so the host list still loads.
     const memberLimit = host.memberLimit;
-    if (memberLimit !== undefined && (!isNumber(memberLimit) || !Number.isSafeInteger(memberLimit) || memberLimit < 1))
-      throw new Error("Invalid remote host member limit.");
+    const validLimit = isNumber(memberLimit) && Number.isSafeInteger(memberLimit) && memberLimit >= 1;
     return {
       hostId: requiredString(host, "hostId"),
       name: requiredString(host, "name"),
@@ -151,7 +151,7 @@ export function decodeRemoteHosts(value: unknown): RemoteHostSummary[] {
       authEpoch: host.authEpoch,
       membershipId: requiredString(host, "membershipId"),
       role: host.role,
-      ...(memberLimit === undefined ? {} : { memberLimit }),
+      ...(validLimit ? { memberLimit } : {}),
     };
   });
 }

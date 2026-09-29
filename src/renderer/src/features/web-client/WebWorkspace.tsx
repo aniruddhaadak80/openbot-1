@@ -271,9 +271,10 @@ function WebWorkspaceFrame(props: WebWorkspaceProps) {
   // True when the account can create hosted servers. The plus button then opens the plans.
   const [hostedServersAvailable, setHostedServersAvailable] = createSignal(false);
   async function refreshHostedServersAvailable(): Promise<boolean> {
+    // A failed read keeps the last answer: a network error does not turn the plans off.
     const available = await hostedServerCalls.list().then(
       (list) => list.available,
-      () => false,
+      () => hostedServersAvailable(),
     );
     setHostedServersAvailable(available);
     return available;

@@ -750,10 +750,17 @@ export class CentralAuthManager extends EventEmitter<CentralAuthEvents> {
     if (this.#sessionAccountId !== null && this.#sessionAccountId !== redeemed.user.id) {
       this.#teamHostTokens.clear();
     }
+    const previousToken = this.#sessionToken;
     this.#sessionToken = redeemed.sessionToken;
     // The claim is spent. A session that is not stored ends at the next start, so a failed write fails
-    // the redeem. The start retry redeems the claim again in its retry window.
-    await this.#writeStoredSession({ required: true });
+    // the redeem, and the session is not kept in memory. The start retry redeems the claim again in its
+    // retry window.
+    try {
+      await this.#writeStoredSession({ required: true });
+    } catch (error) {
+      this.#sessionToken = previousToken;
+      throw error;
+    }
     const user = this.#resolveUserAvatar(redeemed.user);
     this.#setState({ status: "signed_in", user });
     return { hostId: redeemed.hostId, name: redeemed.name, user };

@@ -87,7 +87,7 @@ async function main(): Promise<void> {
       ].join(" && "),
     );
     await saveNamedSnapshot(boat, builderId, options.name);
-    logger.info(`The template ${options.name} is ready. Set HOSTED_SERVER_TEMPLATE to it on the test Worker.`);
+    logger.info(`The template ${options.name} is ready. Set HOSTED_SERVER_TEMPLATE to it on the Worker that uses it.`);
   } finally {
     await boat("DELETE", `/sandboxes/${encodeURIComponent(builderId)}`, "Builder deletion", {
       headers: { "X-Ascii-Confirm-Delete": builderId },
