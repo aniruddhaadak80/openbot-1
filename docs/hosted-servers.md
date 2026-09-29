@@ -286,9 +286,10 @@ allows only `small` and `default`, so a Pro server (`large`) needs a paid boat p
 These were not tested on boat. Test them before a user gets access:
 
 - that production Signal accepts tickets from the `test` Worker;
-- a lost response to the boat create call. The Worker sends the same request again, and boat
-  returns the same sandbox. boat keeps an idempotency key for 24 hours, and the cron retries every
-  10 minutes, so a retry after 24 hours can make a second sandbox. The test uses a fake boat;
+- a lost response to the boat create call. A probe on 2026-09-29 confirmed that a second create
+  with the same key and body returns the same sandbox, in its current state, and makes no second
+  one. A lost answer was not tested on boat; the test uses a fake boat. If boat keeps a key for
+  24 hours, a retry after that can make a second sandbox;
 - a sandbox that boat no longer has (`404`). The Worker keeps its ID and shows `error`, and does not
   make a new sandbox by itself: a wrong `BOAT_API_KEY` also gives `404` for each sandbox. An operator
   must check the key before a user deletes the server;
