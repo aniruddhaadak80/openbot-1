@@ -291,9 +291,9 @@ export class BillingService {
       this.#analytics.track(stored.user_id, {
         name: "billing_action",
         action: "plan_ended",
-        plan: isOneOf(BILLING_PLAN_IDS, stored.plan) ? stored.plan : undefined,
-        interval: isOneOf(BILLING_INTERVALS, stored.interval) ? stored.interval : undefined,
-        currency: isBillingCurrency(stored.currency) ? stored.currency : undefined,
+        ...(isOneOf(BILLING_PLAN_IDS, stored.plan) ? { plan: stored.plan } : {}),
+        ...(isOneOf(BILLING_INTERVALS, stored.interval) ? { interval: stored.interval } : {}),
+        ...(isBillingCurrency(stored.currency) ? { currency: stored.currency } : {}),
         amount: stored.amount,
       });
     }
