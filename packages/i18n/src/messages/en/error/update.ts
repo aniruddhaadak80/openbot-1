@@ -20,7 +20,7 @@ export const messages = defineMessages("error.update", {
   "error.update.siblingSession":
     "Another OpenBot session is still running from this application. Stop OpenBot in every other macOS user account first, then install the update again.",
   "error.update.siblingSessionSameAccount":
-    "Another OpenBot process is still running in this user account (process {pids}). Quit the other OpenBot window, then install the update again.",
+    "Another OpenBot process is still running in this user account. Quit it, then install the update again.",
   "error.update.siblingCheckFailed": "Could not verify other OpenBot sessions. Try again before installing.",
   // A joined server's admin reads these from the host.
   "error.update.remoteDisabled": "Updates from server admins are turned off on this computer.",

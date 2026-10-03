@@ -290,7 +290,7 @@ describe("UpdateService", () => {
     expect(updater.quitAndInstall).toHaveBeenCalledWith(false, true);
   });
 
-  it("names the blocking process when every sibling runs in this user account", async () => {
+  it("says the blocking process runs in this user account when every sibling does", async () => {
     const updater = new FakeUpdater();
     const beforeInstall = vi.fn(async () => undefined);
     makeUpdateAvailable(updater);
@@ -310,7 +310,6 @@ describe("UpdateService", () => {
     await service.checkForUpdates();
     await service.downloadUpdate();
 
-    await expect(service.installUpdate()).rejects.toThrow(/process 4242, 4343/iu);
     await expect(service.installUpdate()).rejects.toThrow(/this user account/iu);
     expect(beforeInstall).not.toHaveBeenCalled();
     expect(updater.quitAndInstall).not.toHaveBeenCalled();

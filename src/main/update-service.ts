@@ -541,7 +541,7 @@ export class UpdateService extends EventEmitter<UpdateServiceEvents> {
   }
 
   /**
-   * A refusal that names the blocking session. Siblings in this account are usually a second
+   * A refusal that says where the blocking session runs. Siblings in this account are usually a second
    * window of this user, so the message points at it. Anything else is another macOS user, and
    * the generic message keeps applying. An unknown uid cannot tell them apart, so it also keeps
    * the generic message.
@@ -549,8 +549,7 @@ export class UpdateService extends EventEmitter<UpdateServiceEvents> {
   #siblingSessionMessage(siblings: readonly OpenBotSiblingInstance[]): string {
     const currentUid = this.#options.currentUid;
     if (currentUid !== undefined && siblings.every((sibling) => sibling.uid === currentUid)) {
-      const pids = siblings.map((sibling) => sibling.pid).join(", ");
-      return sourceText("error.update.siblingSessionSameAccount", { pids });
+      return sourceText("error.update.siblingSessionSameAccount");
     }
     return SIBLING_SESSION_MESSAGE;
   }
