@@ -849,8 +849,8 @@ export class AgentStore {
     const parsed = parseAgentAvatarUrl(agent.avatarUrl, agent.id);
     if (!parsed) return;
     const name = `${parsed.version}.${avatarFileExtension(parsed.mimeType)}`;
+    if ((await fileExists(join(currentPath, name))) !== false) return;
     try {
-      if (await fileExists(join(currentPath, name))) return;
       await rename(join(legacyPath, name), join(currentPath, name));
     } catch (error) {
       logger.warn("Could not move an uploaded agent avatar to its new directory.", toLogValue(error));
@@ -1318,12 +1318,13 @@ async function directoryExists(path: string): Promise<boolean> {
  * migrated and so must never be the reason the app refuses to open. `null` is "could not tell" -- an
  * `EACCES`, an `EPERM`, a Windows lock -- and every caller treats it as "leave this alone".
  */
-async function fileExists(path: string): Promise<boolean> {
+async function fileExists(path: string): Promise<boolean | null> {
   try {
     return (await lstat(path)).isFile();
   } catch (error) {
     if (isRecord(error) && error.code === "ENOENT") return false;
-    throw error;
+    logger.warn("Could not check an uploaded agent avatar during startup reconciliation.", toLogValue(error));
+    return null;
   }
 }
 

@@ -9,6 +9,23 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentStore } from "./agent-store";
 
 const temporaryRoots: string[] = [];
+
+/** The one path whose `lstat` answers the way a held-open file does on Windows. */
+const unreadable = vi.hoisted((): { path: string | null } => ({ path: null }));
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    lstat: async (target: string) => {
+      if (target === unreadable.path) {
+        throw Object.assign(new Error(`EPERM: operation not permitted, lstat '${target}'`), { code: "EPERM" });
+      }
+      return actual.lstat(target);
+    },
+  };
+});
+
 const AGENT_PROFILE_INPUT = {
   name: "Planning Agent",
   description: "Builds clear plans for everyday tasks.",
@@ -24,6 +41,7 @@ const EMPTY_LAYOUT = {
 };
 
 afterEach(async () => {
+  unreadable.path = null;
   await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true })));
 });
 
@@ -151,6 +169,37 @@ describe("AgentStore", () => {
     await adopted.initialize();
 
     await expect(readFile(adopted.resolveAvatar(agent.id)?.path ?? "")).resolves.toEqual(Buffer.from(image));
+  });
+
+  it("leaves an uploaded avatar alone when the destination file cannot be checked", async () => {
+    const root = await mkdtemp(join(tmpdir(), "openbot-store-held-avatar-"));
+    temporaryRoots.push(root);
+    const userData = join(root, "user-data");
+    const home = join(root, "home");
+    const store = new AgentStore(userData, home);
+    await store.initialize();
+    const agent = await store.createAgent(AGENT_PROFILE_INPUT);
+    const image = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    await store.setAvatar(agent.id, { mimeType: "image/png", bytes: image });
+    const uploadedPath = store.resolveAvatar(agent.id)?.path ?? "";
+
+    // A pre-rename build left the same file name under the old agent id, carrying other bytes. Both avatar
+    // directories therefore exist, which is the only state in which one file is carried across, and the
+    // bytes under the new id are the newer upload.
+    const legacyAvatar = join(userData, "avatars", "agents", `bot-${agent.id.slice("agent-".length)}`);
+    await mkdir(legacyAvatar, { recursive: true });
+    await writeFile(join(legacyAvatar, basename(uploadedPath)), "the stale upload");
+
+    // Windows answers `EPERM` here while the search indexer or antivirus holds the file open, and this
+    // runs after the database has already migrated. `fileExists` promises never to be the reason the app
+    // refuses to open, so it has to report "could not tell" instead of throwing.
+    unreadable.path = uploadedPath;
+
+    await new AgentStore(userData, home).initialize();
+
+    // "Could not tell" is not "absent". Treating it as absent renames the stale copy over the upload the
+    // user can see, and `rename` replaces the destination without asking.
+    await expect(readFile(uploadedPath)).resolves.toEqual(Buffer.from(image));
   });
 
   it("persists stable OpenBot thread ids in SQLite", async () => {
