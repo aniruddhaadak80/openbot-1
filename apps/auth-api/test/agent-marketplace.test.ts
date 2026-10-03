@@ -56,7 +56,7 @@ async function walkCatalog(marketplace: AgentMarketplace, legacy: boolean): Prom
   const seen: string[] = [];
   let cursor: string | undefined;
   for (let request = 0; request < 10; request += 1) {
-    const result = await marketplace.list({ limit: 2, cursor });
+    const result = await marketplace.list({ limit: 2, ...(cursor ? { cursor } : {}) });
     seen.push(...result.agents.map((agent) => agent.id));
     const last = result.agents.at(-1);
     if (!result.nextCursor || !last) return seen;
